@@ -105,21 +105,6 @@ impl<'a> FetchType<'a> {
     
 }
 
-// impl<'a> FetchType<'a> {
-//     pub fn all() -> Vec<FetchType<'a>> {
-//         vec![
-//             FetchType::UID,
-//             FetchType::BODYSTRUCTURE,
-//             FetchType::ENVELOPE,
-//             FetchType::FLAGS,
-//             FetchType::INTERNALDATE,
-//             FetchType::RFC822SIZE,
-//             FetchType::BODYPEEKSECTION("", ""),
-//             FetchType::BODYSECTION("", ""),
-//         ]
-//     }
-// }
-
 impl SeqRange {
     
     pub fn first() -> Self {
@@ -216,6 +201,14 @@ pub async fn store<'a>(session: &'a mut ImapSession, ss: &SeqRange, store_type: 
             flag_string
         )
     ).await?.try_collect::<Vec<_>>().await?; // Ensure the stream has been fully available (even though nothing is supposed to return lol)
+    Ok(())
+}
+
+pub async fn append<'a>(session: &'a mut ImapSession, folder: &str, flags: &Vec<MailFlag<'_>>, date: Option<&str>, body: String) -> Result<(), DynErr> {
+    let flag_string = MailFlag::flag_string(flags);
+    let flags_arg = if flags.len() == 0 { None } else { Some(flag_string.as_str()) };
+    let date_args = if date.is_none() { None } else { Some(date.unwrap()) };
+    session.net.append(folder, flags_arg, date_args, body.as_bytes()).await?;
     Ok(())
 }
 
