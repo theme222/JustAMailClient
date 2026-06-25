@@ -1,3 +1,4 @@
+-- Add migration script here
 CREATE TABLE IF NOT EXISTS mailboxes (
     id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
     account_id INTEGER NOT NULL,
@@ -16,4 +17,4 @@ CREATE TABLE IF NOT EXISTS mailboxes_messages ( -- Many mailboxes to Many messag
     PRIMARY KEY (mailbox_id, message_id),
     FOREIGN KEY (mailbox_id) REFERENCES mailboxes(id) ON DELETE CASCADE,
     FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
-)
+);

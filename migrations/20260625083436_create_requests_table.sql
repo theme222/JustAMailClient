@@ -1,10 +1,10 @@
--- Table to store pending requests that are unstable (network reliant)
+-- Add migration script here
 CREATE TABLE IF NOT EXISTS requests (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     action TEXT NOT NULL, -- TBD
     args BLOB, -- [JSONB]
-    request_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    finished_time DATETIME
+    request_time INTEGER NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    finished_time INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_requests_request_time ON requests(request_time);
