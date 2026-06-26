@@ -7,6 +7,19 @@ use lettre::transport::smtp::authentication::Credentials as lettreCredentials;
 
 use crate::models::*;
 
+pub async fn get_mailer(credentials: &Credentials) -> Result<AsyncSmtpTransport<Tokio1Executor>> {
+    let creds = lettreCredentials::new(
+        credentials.login.clone(), 
+        credentials.secret.clone()
+    );
+
+    Ok(
+        AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&credentials.push_server)?
+            .credentials(creds)
+            .build()
+    )
+}
+
 pub async fn send_test_email(credentials: &Credentials) -> Result<()> {
     let email = Message::builder()
         .from(credentials.login.parse().unwrap())
@@ -18,17 +31,30 @@ pub async fn send_test_email(credentials: &Credentials) -> Result<()> {
         )
         .unwrap();
 
-    let creds = lettreCredentials::new(
-        credentials.login.clone(), 
-        credentials.secret.clone()
-    );
 
-    let mailer: AsyncSmtpTransport<Tokio1Executor> = 
-        AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&credentials.push_server)
-            .unwrap()
-            .credentials(creds)
-            .build();
+    let mailer = get_mailer(credentials).await?;
+    let res = mailer.send(email).await?;
+    
+    for line in res.message() {
+        println!("{}", line);
+    }
+    
+    Ok(())
+}
 
+pub async fn send_echo_email(credentials: &Credentials) -> Result<()> {
+    let email = Message::builder()
+        .from(credentials.login.parse().unwrap())
+        .to(credentials.login.parse().unwrap())
+        .subject("Test echo email")
+        .header(ContentType::TEXT_PLAIN)
+        .body(
+            format!("Test echo email from JustAMailClient {}", std::time::SystemTime::now().duration_since(UNIX_EPOCH).expect("msg").as_secs())
+        )
+        .unwrap();
+
+
+    let mailer = get_mailer(credentials).await?;
     let res = mailer.send(email).await?;
     
     for line in res.message() {

@@ -71,20 +71,20 @@ impl<'a> From<async_imap::types::Flag<'a>> for MailFlag {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FetchType<'a> { // Ignoring types that are equivalent / older with no use case
+pub enum FetchType { // Ignoring types that are equivalent / older with no use case
     UID,
     BODYSTRUCTURE,
     ENVELOPE,
     FLAGS,
     INTERNALDATE,
     RFC822SIZE,
-    BODYPEEKSECTION(&'a str, &'a str),
-    BODYSECTION(&'a str, &'a str),
+    BODYPEEKSECTION(&'static str, &'static str),
+    BODYSECTION(&'static str, &'static str),
 }
 
-impl<'a> FetchType<'a> {
+impl FetchType {
     
-    pub fn fetch_string(fetch_type: &Vec<FetchType<'a>>) -> String {
+    pub fn fetch_string(fetch_type: &Vec<FetchType>) -> String {
         let mut result_str = String::new();
         
         for ft in fetch_type {
@@ -114,7 +114,6 @@ impl<'a> FetchType<'a> {
         return result_str
     }
 
-    
 }
 
 impl SeqRange {
@@ -225,7 +224,7 @@ impl ImapSession {
         Ok(())
     }
     
-    pub async fn fetch_stream<'a>(self: &'a mut Self, ss: &SeqRange, fetch_types: &Vec<FetchType<'_>>) -> Result<StreamResult<'a, async_imap::types::Fetch>> { 
+    pub async fn fetch_stream<'a>(self: &'a mut Self, ss: &SeqRange, fetch_types: &Vec<FetchType>) -> Result<StreamResult<'a, async_imap::types::Fetch>> { 
         self.ensure_mailbox_exists().await?;
         let fetch_query = FetchType::fetch_string(fetch_types);
         let sss = ss.sequence_set_str(self.current_mailbox.as_ref().unwrap());
@@ -266,13 +265,11 @@ impl ImapSession {
     pub async fn idle<'a>(mut self: Self) -> Result<()> {
         Self::ensure_mailbox_exists(&mut self).await?;
     
-        // 2. Initialize the IDLE command
-        let idle_timeout = std::time::Duration::from_secs(29 * 60);
         let mut handle = self.net_session.take().expect("net_session is None").idle();
         handle.init().await?;
         
         loop {
-            let (idle_wait_future, stop_idle) = handle.wait_with_timeout(idle_timeout);
+            let (idle_wait_future, stop_idle) = handle.wait_with_timeout(IDLE_TIMEOUT);
             let idle_response = idle_wait_future.await?; 
             // This is what it returned btw:
             // NewData(ResponseData { raw: 4096, response: MailboxData(Exists(8)) })
@@ -309,16 +306,16 @@ impl ImapSession {
 }
 
 pub enum ImapSessionType {
-    Idler(&'static str),
-    Puller(&'static str),
-    Actor(&'static str),
+    Idler(String),
+    Puller(String),
+    Actor(String),
 }
 
 pub struct ImapManager { // One manager per account
     pub credentials: Credentials,
-    pub idler: Option<ImapSession>,
-    pub puller: Option<ImapSession>,
-    pub actor: Option<ImapSession>,
+    idler: Option<ImapSession>,
+    puller: Option<ImapSession>,
+    actor: Option<ImapSession>,
 }
 
 impl ImapManager {
@@ -331,12 +328,17 @@ impl ImapManager {
             ImapSession::new(credentials),
         );
 
-        Ok(Self {
+        let mut manager = Self {
             credentials: credentials.clone(),
             idler: idler.ok(),
             puller: puller.ok(),
             actor: actor.ok(),
-        })
+        };
+
+        // let idle_session = manager.get_owned_session(ImapSessionType::Idler("INBOX".into())).await;
+        // idle_session.idle()
+        
+        Ok(manager)
     }
 
     pub async fn get_session(&mut self, session_type: ImapSessionType) -> &mut ImapSession {
@@ -346,7 +348,7 @@ impl ImapManager {
             ImapSessionType::Actor(mb) => (self.actor.as_mut().unwrap(), mb),
         };
 
-        session.select_mailbox(mb); // Obviously in the future this will probably be more complicated
+        session.select_mailbox(&mb).await; // Obviously in the future this will probably be more complicated
         session
     }
 
@@ -357,7 +359,7 @@ impl ImapManager {
             ImapSessionType::Actor(mb) => (self.actor.take().unwrap(), mb),
         };
 
-        session.select_mailbox(mb); // Obviously in the future this will probably be more complicated
+        session.select_mailbox(&mb).await; // Obviously in the future this will probably be more complicated
         session
     }
 

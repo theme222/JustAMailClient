@@ -1,6 +1,18 @@
 pub use anyhow::{anyhow, Result, Error, Context};
+use crate::ui::UIMessage;
+use crate::net::NetMessage;
+use crate::srv::SrvMessage;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+pub use crate::consts::*;
+
+#[derive(Clone, Debug)]
+pub struct Senders { // Global values after initialization
+    pub net_sender: tokio::sync::mpsc::Sender<NetMessage>,
+    pub srv_sender: tokio::sync::mpsc::Sender<SrvMessage>,
+    pub ui_sender:  tokio::sync::mpsc::Sender<UIMessage>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Credentials {
     pub login: String,
     pub secret: String,
@@ -8,10 +20,15 @@ pub struct Credentials {
     pub push_server: String,
 }
 
-pub const APP_NAME: &str = "JustAMailClient";
-pub const APP_AUTHOR: &str = "Sira Tongsima";
-pub const APP_VERSION: &str = "0.1.0";
-pub const TEST_MAIL_DEST: &str = "Sira Tongsima <sira.tongsima@yahoo.com>";
+// #[derive(Clone, Debug, PartialEq, Eq)]
+// pub struct Mail {
+//     pub id: String,
+//     pub subject: String,
+//     pub from: String,
+//     pub to: String,
+//     pub date: String,
+//     pub body: String,
+// }
 
 pub fn project_dir() -> directories::ProjectDirs {
     directories::ProjectDirs::from("com", "tongsima", "jamc").expect("Failed to find project directories")
