@@ -20,16 +20,20 @@ pub struct Credentials {
     pub push_server: String,
 }
 
-// #[derive(Clone, Debug, PartialEq, Eq)]
-// pub struct Mail {
-//     pub id: String,
-//     pub subject: String,
-//     pub from: String,
-//     pub to: String,
-//     pub date: String,
-//     pub body: String,
-// }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Mail {
+    pub id: String,
+    pub subject: String,
+    pub from: String,
+    pub to: String,
+    pub date: String,
+    pub body: String,
+}
 
 pub fn project_dir() -> directories::ProjectDirs {
     directories::ProjectDirs::from("com", "tongsima", "jamc").expect("Failed to find project directories")
+}
+
+pub fn unix_timestamp() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::SystemTime::UNIX_EPOCH).unwrap().as_millis() as i64
 }

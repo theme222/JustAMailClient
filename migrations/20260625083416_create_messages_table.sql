@@ -4,19 +4,19 @@ CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT, -- Unique message id number 5,937,510
     account_id INTEGER NOT NULL, -- id of the account this message was sent from / recieved from
     type TEXT NOT NULL, -- TBD
-    last_sync_time INTEGER NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_sync_time INTEGER NOT NULL,
     last_query_time INTEGER,
     /* Internal Fields */
     /* Other Fields */
     flags BLOB NOT NULL, -- JSONB
     size INTEGER NOT NULL, -- CONST
-    internal_date INTEGER NOT NULL, -- CONST
+    internal_date INTEGER NOT NULL, -- CONST time in milliseconds since epoch
     bodystructure BLOB NOT NULL, -- CONST JSONB
     /* Other Fields */
     /* Header Fields */
     imap_uid INTEGER, -- Standard IMAP UID
-    gmail_msg_id INTEGER, -- X-GM-MSGID (64-bit unsigned int)
-    gmail_thread_id INTEGER, -- X-GM-THRID (64-bit unsigned int)
+    -- gmail_msg_id INTEGER, -- X-GM-MSGID (64-bit unsigned int)
+    -- gmail_thread_id INTEGER, -- X-GM-THRID (64-bit unsigned int)
     /* Envelope Fields */
     rfc_message_id TEXT, -- CONST Standard Message-ID header
     env_date TEXT, -- CONST
@@ -44,7 +44,7 @@ CREATE INDEX IF NOT EXISTS idx_messages_gmail_thread_id ON messages(gmail_thread
 CREATE INDEX IF NOT EXISTS idx_messages_internal_date ON messages(internal_date);
 
 CREATE VIRTUAL TABLE message_search USING fts5(
-    subject, 
+    env_subject, 
     body_preview, 
     content='messages', 
     content_rowid='id',
@@ -54,18 +54,18 @@ CREATE VIRTUAL TABLE message_search USING fts5(
 
 -- Trigger Warning 
 CREATE TRIGGER trg_messages_ai AFTER INSERT ON messages BEGIN
-    INSERT INTO message_search(rowid, subject, body_preview) 
-    VALUES (new.id, new.subject, new.body_preview);
+    INSERT INTO message_search(rowid, env_subject, body_preview) 
+    VALUES (new.id, new.env_subject, new.body_preview);
 END;
 
 CREATE TRIGGER trg_messages_ad AFTER DELETE ON messages BEGIN
-    INSERT INTO message_search(message_search, rowid, subject, body_preview) 
-    VALUES ('delete', old.id, old.subject, old.body_preview);
+    INSERT INTO message_search(message_search, rowid, env_subject, body_preview) 
+    VALUES ('delete', old.id, old.env_subject, old.body_preview);
 END;
 
 CREATE TRIGGER trg_messages_au AFTER UPDATE ON messages BEGIN
-    INSERT INTO message_search(message_search, rowid, subject, body_preview) 
-    VALUES ('delete', old.id, old.subject, old.body_preview);
-    INSERT INTO message_search(rowid, subject, body_preview) 
-    VALUES (new.id, new.subject, new.body_preview);
+    INSERT INTO message_search(message_search, rowid, env_subject, body_preview) 
+    VALUES ('delete', old.id, old.env_subject, old.body_preview);
+    INSERT INTO message_search(rowid, env_subject, body_preview) 
+    VALUES (new.id, new.env_subject, new.body_preview);
 END;

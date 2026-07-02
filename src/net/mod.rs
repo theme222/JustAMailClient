@@ -1,15 +1,17 @@
 use crate::net::fetch::imap::*;
 use crate::models::*;
+use futures::stream::{Stream, StreamExt};
 
 pub mod fetch;
 pub mod push;
+pub mod structure;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NetAction {
-    SendEcho(Credentials),
-    SendEmail(Credentials),
-    FetchEmail(Credentials),
-    Shutdown,
+    SENDECHO(Credentials),
+    SENDEMAIL(Credentials),
+    FETCHEMAIL(Credentials),
+    SHUTDOWN,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,14 +23,6 @@ pub struct NetActor {
     inbox: tokio::sync::mpsc::Receiver<NetMessage>,
     senders: Senders,
     managers: std::collections::HashMap<Credentials, ImapManager>, 
-}
-
-async fn get_or_create_manager<'a>(managers: &'a mut std::collections::HashMap<Credentials, ImapManager>, credentials: &Credentials) -> Result<&'a mut ImapManager> {
-    if !managers.contains_key(credentials) {
-        let manager = ImapManager::new(credentials).await?;
-        managers.insert(credentials.clone(), manager);
-    }
-    Ok(managers.get_mut(&credentials).unwrap())
 }
 
 // pub async fn retry_network<T, Func, Fut>(action: Func) -> Result<T>
@@ -61,23 +55,42 @@ impl NetActor {
             println!("Doing action: {:?}", msg.action);
             
             match msg.action {
-                SendEcho(c) => { push::smtp::send_echo_email(&c).await.unwrap(); }
-                SendEmail(c) => { push::smtp::send_test_email(&c).await.unwrap(); }
-                FetchEmail(c) => {
-                    let manager = get_or_create_manager(&mut self.managers, &c).await.unwrap();
+                SENDECHO(c) => { push::smtp::send_echo_email(&c).await.unwrap(); }
+                SENDEMAIL(c) => { push::smtp::send_test_email(&c).await.unwrap(); }
+                FETCHEMAIL(c) => {
+                    
+                    if !self.managers.contains_key(&c) {
+                        let manager = ImapManager::new(c.clone(), self.senders.clone()).await.unwrap();
+                        self.managers.insert(c.clone(), manager);
+                    }
+                    
+                    let manager = self.managers.get_mut(&c).unwrap();
+                    
                     let session = manager.get_session(fetch::imap::ImapSessionType::Puller("INBOX".into())).await;
-                    let mut stream = session.fetch_stream(&SeqRange::last(), &vec![
+                    let mut stream = session.fetch_stream(&SeqRange::all(), &vec![
                         UID,
                         BODYSTRUCTURE,
                         ENVELOPE,
                         FLAGS,
                         INTERNALDATE,
                         RFC822SIZE,
-                        BODYPEEKSECTION("TEXT", "8192")
+                        BODYPEEKSECTION("TEXT".into(), format!("0.{}", MAX_PREVIEW_SIZE)),
                     ]).await.unwrap();
-                    println!("{:?}", ImapSession::parse_fetch_stream_all(&mut stream).await.unwrap());
+                    
+                    let mut results: Vec<async_imap::types::Fetch> = Vec::new();
+                    
+                    use crate::srv::*;
+                    use crate::srv::SrvAction::*;
+                
+                    while let Some(mail_result) = stream.next().await {
+                        match mail_result {
+                            Err(e) => { eprintln!("Error while parsing fetch stream: {:?}", e); }
+                            Ok(mail) => { self.senders.srv_sender.send(SrvMessage {action: SYNCEMAIL(mail)}).await.unwrap(); }
+                        }
+                    }
+              
                 }
-                Shutdown => { break; }
+                SHUTDOWN => { break; }
             }
         }
         println!("Ending net actor");

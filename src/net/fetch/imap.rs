@@ -2,12 +2,15 @@ use std::error::Error;
 
 use async_imap::extensions::idle::IdleResponse::{ManualInterrupt, NewData, Timeout};
 use async_native_tls::TlsStream;
+use imap_proto::Response::MailboxData;
 use tokio::{net::TcpStream};
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt};
 use futures::{Stream, StreamExt, TryStreamExt};
+use std::sync::{Arc, Mutex};
 
 use bitflags::bitflags;
-use crate::models::*;
+use crate::{models::*, srv::SrvMessage};
+use crate::*;
 
 // type Mailbox = async_imap::types::Mailbox;
 type StreamResult<'a, T> = std::pin::Pin<Box<dyn Stream<Item = Result<T, async_imap::error::Error>> + 'a + Send>>;
@@ -17,7 +20,7 @@ pub struct SeqRange { // Zero Indexed. Negative values count from the end of the
     pub end: i32, 
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum MailFlag {
     SEEN,
     ANSWERED,
@@ -27,6 +30,10 @@ pub enum MailFlag {
     RECENT,
     MAYCREATE,
     CUSTOM(String),
+}
+
+pub struct StopIdle {
+    current_net_stopper: Arc<Mutex<Option<stop_token::StopSource>>>
 }
 
 impl MailFlag {
@@ -70,7 +77,7 @@ impl<'a> From<async_imap::types::Flag<'a>> for MailFlag {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FetchType { // Ignoring types that are equivalent / older with no use case
     UID,
     BODYSTRUCTURE,
@@ -78,8 +85,8 @@ pub enum FetchType { // Ignoring types that are equivalent / older with no use c
     FLAGS,
     INTERNALDATE,
     RFC822SIZE,
-    BODYPEEKSECTION(&'static str, &'static str),
-    BODYSECTION(&'static str, &'static str),
+    BODYPEEKSECTION(String, String),
+    BODYSECTION(String, String),
 }
 
 impl FetchType {
@@ -131,11 +138,11 @@ impl SeqRange {
     }
 
     pub fn sequence_set_str(&self, mailbox: &Mailbox) -> String {
-        let size = mailbox.exists;
-        let start = if self.start < 0 { (size as i32) + self.start + 1 } else { self.start + 1 };
-        let start = start.clamp(1, size as i32);
-        let end = if self.end < 0 { (size as i32) + self.end + 1 } else { self.end + 1 };
-        let end = end.clamp(1, size as i32);
+        let size = mailbox.exists as i32;
+        let start = if self.start < 0 { size + self.start + 1 } else { self.start + 1 };
+        let start = start.clamp(1, size);
+        let end = if self.end < 0 { size + self.end + 1 } else { self.end + 1 };
+        let end = end.clamp(1, size);
         format!("{}:{}", start, end)
     }
     
@@ -146,7 +153,7 @@ pub struct EmailAccount {
     pub mailboxes: Vec<async_imap::types::Mailbox>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Mailbox {
     pub name: String,
     pub flags: Vec<MailFlag>,
@@ -159,6 +166,18 @@ pub struct Mailbox {
     pub highest_modseq: Option<u64>,
 }
 
+impl std::fmt::Debug for Mailbox {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Mailbox")
+            .field("name", &self.name)
+            .field("exists", &self.exists)
+            .field("recent", &self.recent)
+            .field("uid_next", &self.uid_next)
+            .field("uid_validity", &self.uid_validity)
+            .finish()
+    }
+}
+
 impl PartialEq for Mailbox {
     fn eq(&self, other: &Self) -> bool {
         self.name == other.name
@@ -167,15 +186,15 @@ impl PartialEq for Mailbox {
 
 impl Eq for Mailbox {}
 
-impl From<async_imap::types::Mailbox> for Mailbox {
-    fn from(mailbox: async_imap::types::Mailbox) -> Self {
+impl From<&async_imap::types::Mailbox> for Mailbox {
+    fn from(mailbox: &async_imap::types::Mailbox) -> Self {
         Mailbox {
             name: String::new(),
-            flags: mailbox.flags.into_iter().map(MailFlag::from).collect(),
+            flags: mailbox.flags.clone().into_iter().map(MailFlag::from).collect(),
             exists: mailbox.exists,
             recent: mailbox.recent,
             unseen: mailbox.unseen,
-            permanent_flags: mailbox.permanent_flags.into_iter().map(MailFlag::from).collect(),
+            permanent_flags: mailbox.permanent_flags.clone().into_iter().map(MailFlag::from).collect(),
             uid_next: mailbox.uid_next,
             uid_validity: mailbox.uid_validity,
             highest_modseq: mailbox.highest_modseq,
@@ -186,12 +205,13 @@ impl From<async_imap::types::Mailbox> for Mailbox {
 pub struct ImapSession {
     pub net_session: Option<async_imap::Session<Compat<TlsStream<TcpStream>>>>, 
     pub current_mailbox: Option<Mailbox>,
+    pub senders: Senders,
     // pub account: EmailAccount,
 } 
 
 impl ImapSession {
     
-    pub async fn new(cred: &Credentials) -> Result<Self> {
+    pub async fn new(cred: &Credentials, senders: Senders) -> Result<Self> {
         let imap_addr = (cred.fetch_server.clone(), 993);
         let tcp_stream = TcpStream::connect(&imap_addr).await?;
         let tls = async_native_tls::TlsConnector::new();
@@ -201,6 +221,7 @@ impl ImapSession {
         Ok(ImapSession {
             net_session: Some(client.login(&cred.login, &cred.secret).await.map_err(|e| e.0)?),
             current_mailbox: None,
+            senders: senders,
             // account: EmailAccount {
             //     is_init: false,
             //     mailboxes: Vec::new(),
@@ -212,10 +233,14 @@ impl ImapSession {
         self.net_session.as_mut().expect("Imap session unavailable")
     }
     
+    // SELECT: Select a mailbox on the server.
     pub async fn select_mailbox<'a>(self: &'a mut Self, mailbox: &str) -> Result<()> {
         if let Some(curr_mb) = &self.current_mailbox { if curr_mb.name == mailbox { return Ok(()); } }
         let mailbox = self.get_net().select(mailbox).await?;
-        self.current_mailbox = Some(mailbox.into());
+        self.current_mailbox = Some((&mailbox).into());
+        self.current_mailbox.as_mut().map(|mut mb| mb.name = "INBOX".into());
+        println!("Selected mailbox: {:?}", self.current_mailbox);
+        self.senders.srv_sender.send(SrvMessage {action: srv::SrvAction::SYNCMAILBOX(self.current_mailbox.as_ref().unwrap().clone())}).await?;
         Ok(())
     }
     
@@ -224,20 +249,24 @@ impl ImapSession {
         Ok(())
     }
     
+    // FETCH: Fetch a stream of mails from the server.
     pub async fn fetch_stream<'a>(self: &'a mut Self, ss: &SeqRange, fetch_types: &Vec<FetchType>) -> Result<StreamResult<'a, async_imap::types::Fetch>> { 
         self.ensure_mailbox_exists().await?;
         let fetch_query = FetchType::fetch_string(fetch_types);
         let sss = ss.sequence_set_str(self.current_mailbox.as_ref().unwrap());
+        println!("Fetching: {} {}", sss, fetch_query);
         let fetch_result = self.get_net().fetch(&sss, fetch_query).await?;
         Ok(Box::pin(fetch_result))
     }
     
+    // DELETE: Mark mails as deleted and expunge them.
     pub async fn delete<'a>(self: &'a mut Self, ss: &SeqRange) -> Result<()> {
         self.store(ss, '+', &vec![MailFlag::DELETED]).await?;
         self.get_net().expunge().await?;
         Ok(())
     }
     
+    // STORE: Update flags of a mail.
     pub async fn store<'a>(self: &'a mut Self, ss: &SeqRange, store_type: char, flags: &Vec<MailFlag>) -> Result<()> {
         if store_type != '+' && store_type != '-' { anyhow::bail!("store_type must be '+' or '-'"); }
         self.ensure_mailbox_exists().await?;
@@ -254,6 +283,7 @@ impl ImapSession {
         Ok(())
     }
     
+    // APPEND: Append a mail to the mailbox.
     pub async fn append<'a>(self: &'a mut Self, folder: &str, flags: &Vec<MailFlag>, date: Option<&str>, body: String) -> Result<()> {
         let flag_string = MailFlag::flag_string(flags);
         let flags_arg = if flags.len() == 0 { None } else { Some(flag_string.as_str()) };
@@ -262,47 +292,80 @@ impl ImapSession {
         Ok(())
     }
     
-    pub async fn idle<'a>(mut self: Self) -> Result<()> {
+    
+    // IDLE: Wait for new mails to arrive.
+    pub async fn idle<'a>(mut self: Self) -> Result<(
+        impl std::future::Future<Output = Result<Self>> + Send + 'static,
+        StopIdle
+    )> {
         Self::ensure_mailbox_exists(&mut self).await?;
     
         let mut handle = self.net_session.take().expect("net_session is None").idle();
         handle.init().await?;
+        let arc = Arc::new(Mutex::new(None));
+        let stop_idle = StopIdle { current_net_stopper: arc.clone(), };
+        let mut is_first_loop = true;
         
-        loop {
-            let (idle_wait_future, stop_idle) = handle.wait_with_timeout(IDLE_TIMEOUT);
-            let idle_response = idle_wait_future.await?; 
-            // This is what it returned btw:
-            // NewData(ResponseData { raw: 4096, response: MailboxData(Exists(8)) })
-            // what they hell am I supposed to do with this shit?
-            match &idle_response {
-                NewData(x) => { },
-                ManualInterrupt => { break; },
-                Timeout => { continue; },
-            }
-            
-            println!("IDLE response: {:?}", idle_response);
-        }
-    
-        self.net_session = Some(handle.done().await?);
-        Ok(())
-    }
-    
-    pub async fn parse_fetch_stream_all<'a>(stream: &mut StreamResult<'a, async_imap::types::Fetch>) -> Result<Vec<async_imap::types::Fetch>> {
-        let mut results: Vec<async_imap::types::Fetch> = Vec::new();
-    
-        while let Some(mail_result) = stream.next().await {
-            if let Err(e) = mail_result {
-                eprintln!("Error while parsing fetch stream: {:?}", e);
-                continue
-            }
-            else if let Ok(mail) = mail_result {
-                results.push(mail);
-            }
-        }
-    
-        Ok(results)
-    }
+        let idle_loop = async move || -> Result<Self> {
+            loop {
+                let (idle_wait_future, new_stopper) = handle.wait_with_timeout(IDLE_TIMEOUT);
+                let prev_stopper_token = arc.lock().unwrap().replace(new_stopper);
+                
+                // We check the previous token in case if it was cancelled in between wait loops.
+                // Otherwise it must have been the new token that was cancelled which means the regular idle call will return
+                let idle_response = tokio::select! { 
+                    idle_response = idle_wait_future => idle_response,
+                    _ = async move {
+                        match prev_stopper_token {
+                            Some(token) => { token.token().await }, // Techincally this is also an infinite loop
+                            None => { if is_first_loop { std::future::pending().await } },
+                        }
+                    } => { break; },
+                }?; 
 
+                is_first_loop = false;
+                
+                // let idle_response = idle_wait_future.await?; 
+                // This is what it returned btw:
+                // NewData(ResponseData { raw: 4096, response: MailboxData(Exists(8)) })
+                // what they hell am I supposed to do with this shit?
+                match &idle_response {
+                    NewData(r) => { 
+                        let response = r.borrow_dependent(); 
+                        if let MailboxData(imap_proto::types::MailboxDatum::Exists(e)) = response {
+                            // Oh my fucking god
+                            self.current_mailbox.as_mut().map(|mut mb| mb.exists = *e as u32);
+                        }
+                    },
+                    ManualInterrupt => { break; },
+                    Timeout => { continue; },
+                }
+                
+                println!("IDLE response: {:?}", idle_response);
+            }
+            self.net_session = Some(handle.done().await?);
+            Ok(self)
+        };
+        
+        Ok((idle_loop(), stop_idle))
+    }
+    
+    // pub async fn parse_fetch_stream_all<'a>(stream: &mut StreamResult<'a, async_imap::types::Fetch>) {
+    //     let mut results: Vec<async_imap::types::Fetch> = Vec::new();
+    
+    //     while let Some(mail_result) = stream.next().await {
+    //         if let Err(e) = mail_result {
+    //             eprintln!("Error while parsing fetch stream: {:?}", e);
+    //             continue
+    //         }
+    //         else if let Ok(mail) = mail_result {
+    //             results.push(mail);
+                
+                
+    //         }
+    //     }
+    // }
+    
 }
 
 pub enum ImapSessionType {
@@ -316,27 +379,34 @@ pub struct ImapManager { // One manager per account
     idler: Option<ImapSession>,
     puller: Option<ImapSession>,
     actor: Option<ImapSession>,
+    idle_stopper: Option<StopIdle>, // Once dropped this should also call drop on the inner value inside of the mutex
+    senders: Senders,
 }
 
 impl ImapManager {
     
-    pub async fn new(credentials: &Credentials) -> Result<Self> { 
+    pub async fn new(credentials: Credentials, senders: Senders) -> Result<Self> { 
         // A very simple model which will be very temporary for now
         let (idler, puller, actor) = tokio::join!(
-            ImapSession::new(credentials),
-            ImapSession::new(credentials),
-            ImapSession::new(credentials),
+            ImapSession::new(&credentials, senders.clone()),
+            ImapSession::new(&credentials, senders.clone()),
+            ImapSession::new(&credentials, senders.clone()),
         );
 
         let mut manager = Self {
-            credentials: credentials.clone(),
+            credentials: credentials,
             idler: idler.ok(),
             puller: puller.ok(),
             actor: actor.ok(),
+            idle_stopper: None,
+            senders: senders,
         };
 
-        // let idle_session = manager.get_owned_session(ImapSessionType::Idler("INBOX".into())).await;
-        // idle_session.idle()
+        let idle_session = manager.get_owned_session(ImapSessionType::Idler("INBOX".into())).await;
+        let (idle_future, stop_idle) = idle_session.idle().await.unwrap();
+        
+        manager.idle_stopper = Some(stop_idle);
+        tokio::spawn(idle_future);
         
         Ok(manager)
     }

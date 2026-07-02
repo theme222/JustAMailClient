@@ -12,10 +12,14 @@ bitflags = "2.13.0"
 directories = "6.0.0"
 dotenvy = "0.15.7"
 futures = "0.3.32"
+imap-proto = "0.16.7"
 lettre = { version = "0.11.22", features = ["tokio1", "tokio1-native-tls", "builder"] }
 mailparse = "0.16.1"
 rfc2047-decoder = "1.1.2"
+serde = "1.0.228"
+serde_json = "1.0.150"
 sqlx = { version = "0.9.0", features = ["sqlite", "runtime-tokio"] }
+stop-token = "0.7.0"
 tokio = { version = "1.52.3", features = ["full"] }
 tokio-util = { version = "0.7.18", features = ["compat"] }
 

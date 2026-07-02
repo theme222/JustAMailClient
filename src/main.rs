@@ -5,18 +5,41 @@ mod init;
 mod ui;
 mod consts;
 
-use std::io::Write;
+use std::{collections::BTreeMap, io::Write};
 
 use models::*;
 
-use crate::{init::{delete_database_if_exists, ensure_project_dir_structure }};
+use init::*;
 use net::*;
+use srv::*;
 
 
 #[tokio::main]
 async fn main() {
     let res = runner().await;
     if let Err(e) = res { eprintln!("Error: {}", e); }
+}
+
+async fn test_decode() -> Result<()> {
+    let raw_data = std::fs::read(std::path::Path::new("sample/partial.eml")).unwrap();
+    let pct = mailparse::ParsedContentType {mimetype: "text/plain".into(), charset: "utf-8".into(), params: BTreeMap::new()};
+    let parser = mailparse::body::Body::new(&raw_data, &pct, &Some(String::from("quoted-printable")));
+    // let parsed_mail = mailparse::parse_mail(&raw_data).unwrap();
+    // for (i, part) in decoded.enumerate() {
+    //     println!("Part {}:\n{}\n", i, part.get_body().unwrap());
+    //     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    // }
+    use mailparse::body::Body::*;
+    let result = match parser {
+        Base64(val) => { val.get_decoded_as_string() },
+        QuotedPrintable(val) => { val.get_decoded_as_string() },
+        SevenBit(val) => { val.get_as_string() },
+        EightBit(val) => { val.get_as_string() },
+        Binary(val) => { val.get_as_string() },
+    };
+
+    println!("{}", result.unwrap_or("Unable to decode".into()));
+    Ok(())
 }
 
 async fn runner() -> Result<()> {
@@ -47,7 +70,7 @@ async fn runner() -> Result<()> {
     };
 
     let mut net_actor = net::NetActor::new(net_receiver, senders.clone()).await;
-    let mut srv_actor = srv::SrvActor::new(srv_receiver, senders.clone()).await.unwrap();
+    let mut srv_actor = srv::SrvActor::new(srv_receiver, senders.clone()).await;
     // let ui_actor = ui::UiActor::new(ui_receiver);
 
     tokio::spawn(async move { net_actor.run().await; });
@@ -66,21 +89,25 @@ async fn runner() -> Result<()> {
     
     // For now lets just treat this as a weird shell like interface (right now we are acting as the ui component)
     loop {
-        print!("Enter command (send, list, exit, echo): ");
+        print!("Enter command (send, list, fetch, exit, echo): ");
         std::io::stdout().flush()?;
         let mut input = String::new();
         std::io::stdin().read_line(&mut input)?;
         let input = input.trim();
 
-        use NetAction::*;
         match input {
-            "send" => { senders.net_sender.send(NetMessage {action: SendEmail(creds.clone()) }).await?; }
-            "echo" => { senders.net_sender.send(NetMessage {action: SendEcho(creds.clone()) }).await?; }
-            "list" => { senders.net_sender.send(NetMessage {action: FetchEmail(creds.clone())}).await?; }
+            "send" => { senders.net_sender.send(NetMessage {action: NetAction::SENDEMAIL(creds.clone()) }).await?; }
+            "echo" => { senders.net_sender.send(NetMessage {action: NetAction::SENDECHO(creds.clone()) }).await?; }
+            "fetch" => { senders.net_sender.send(NetMessage {action: NetAction::FETCHEMAIL(creds.clone())}).await?; }
+            "list" => { senders.srv_sender.send(SrvMessage {action: SrvAction::LISTEMAILS}).await?; }
             "exit" => { break; }
             _ => { println!("Unknown command: {}", input); }
         }
     }
+    
+    senders.net_sender.send(NetMessage {action: NetAction::SHUTDOWN}).await?; 
+    senders.srv_sender.send(SrvMessage {action: SrvAction::SHUTDOWN}).await?;
+    
 
     Ok(())
 }

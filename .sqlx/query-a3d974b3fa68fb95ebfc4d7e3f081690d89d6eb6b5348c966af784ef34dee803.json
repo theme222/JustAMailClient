@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO accounts (local_part, domain, type, fetch_server, push_server) VALUES (?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "a3d974b3fa68fb95ebfc4d7e3f081690d89d6eb6b5348c966af784ef34dee803"
+}
