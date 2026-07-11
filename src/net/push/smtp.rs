@@ -20,7 +20,7 @@ pub async fn get_mailer(credentials: &Credentials) -> Result<AsyncSmtpTransport<
     )
 }
 
-pub async fn send_test_email(credentials: &Credentials) -> Result<()> {
+pub async fn send_test_email(credentials: Credentials) -> Result<()> {
     let email = Message::builder()
         .from(credentials.login.parse().unwrap())
         .to(TEST_MAIL_DEST.parse().unwrap())
@@ -32,7 +32,7 @@ pub async fn send_test_email(credentials: &Credentials) -> Result<()> {
         .unwrap();
 
 
-    let mailer = get_mailer(credentials).await?;
+    let mailer = get_mailer(&credentials).await?;
     let res = mailer.send(email).await?;
     
     for line in res.message() {
@@ -42,7 +42,7 @@ pub async fn send_test_email(credentials: &Credentials) -> Result<()> {
     Ok(())
 }
 
-pub async fn send_echo_email(credentials: &Credentials) -> Result<()> {
+pub async fn send_echo_email(credentials: Credentials) -> Result<()> {
     let email = Message::builder()
         .from(credentials.login.parse().unwrap())
         .to(credentials.login.parse().unwrap())
@@ -54,7 +54,7 @@ pub async fn send_echo_email(credentials: &Credentials) -> Result<()> {
         .unwrap();
 
 
-    let mailer = get_mailer(credentials).await?;
+    let mailer = get_mailer(&credentials).await?;
     let res = mailer.send(email).await?;
     
     for line in res.message() {

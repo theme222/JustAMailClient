@@ -70,28 +70,129 @@ impl From<&imap_proto::BodyContentSinglePart<'_>> for BodyContent {
 pub enum MailBodyStructure { 
     Single {
         headers: BodyHeaders,
-        content: BodyContent
+        content: BodyContent,
+        part_spec: Vec<u32>,
     },
     Multi {
         headers: BodyHeaders,
-        parts: Vec<MailBodyStructure>
+        parts: Vec<MailBodyStructure>,
+        part_spec: Vec<u32>,
+    }
+}
+
+impl MailBodyStructure {
+    fn from_imap_proto_rec(value: &imap_proto::BodyStructure, section_id: Vec<u32>) -> Self {
+        use imap_proto::BodyStructure::*;
+        use MailBodyStructure::*;
+        match value {
+            Basic { common, other, extension } =>  { 
+                Single {  headers: common.into(),  content: other.into(), part_spec: section_id } 
+            }
+            Text { common, other, lines, extension } => { 
+                Single {  headers: common.into(),  content: other.into(), part_spec: section_id } 
+            }
+            Message { common, other, envelope, body, lines, extension } =>
+                { todo!("Uh oh") }
+            Multipart { common, bodies, extension } => {
+                Multi { 
+                    headers: common.into(),
+                    parts: bodies
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, p)| {
+                            let mut section_id = section_id.clone();
+                            section_id.push((i+1).try_into().unwrap());
+                            MailBodyStructure::from_imap_proto_rec(p, section_id)
+                        })
+                        .collect(),
+                    part_spec: section_id,
+                } 
+            }
+        }
+    }
+
+    pub fn get_part_spec_str(&self) -> String {
+        match self {
+            MailBodyStructure::Single { part_spec, .. } => part_spec,
+            MailBodyStructure::Multi { part_spec, .. } => part_spec,
+        }.iter().map(ToString::to_string).collect::<Vec<_>>().join(".")
+    }
+}
+
+impl Default for MailBodyStructure {
+    fn default() -> Self {
+        MailBodyStructure::Single {
+            headers: BodyHeaders::default(),
+            content: BodyContent::default(),
+            part_spec: vec![],
+        }
     }
 }
 
 impl<'a> From<&imap_proto::BodyStructure<'a>> for MailBodyStructure {
     fn from(value: &imap_proto::BodyStructure<'a>) -> Self {
-        use imap_proto::BodyStructure::*;
-        use MailBodyStructure::*;
-        match value {
-            Basic { common, other, extension } => 
-                { Single { headers: common.into(), content: other.into() } }
-            Text { common, other, lines, extension } =>
-                { Single { headers: common.into(), content: other.into() } }
-            Message { common, other, envelope, body, lines, extension } =>
-                { unimplemented!("Uh oh") }
-            Multipart { common, bodies, extension } =>
-                { Multi { headers: common.into(), parts: bodies.into_iter().map(|p| p.into()).collect(), } }
+        MailBodyStructure::from_imap_proto_rec(value, vec![])
+    }
+}
+
+impl IntoIterator for MailBodyStructure {
+    type Item = MailBodyStructure;
+
+    type IntoIter = MailBodyStructureIter;
+
+    fn into_iter(self) -> Self::IntoIter {
+        MailBodyStructureIter::new(self)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MailBodyStructureIter {
+    path: Vec<MailBodyStructure>,
+    curr: Option<MailBodyStructure>,
+}
+
+impl MailBodyStructureIter {
+    pub fn new(bs: MailBodyStructure) -> Self {
+        Self {
+            path: vec![],
+            curr: Some(bs)
         }
+    }
+}
+
+impl Iterator for MailBodyStructureIter {
+    type Item = MailBodyStructure;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.curr.is_none() { return None; }
+        // Find next
+        let curr = self.curr.clone().unwrap();
+        self.curr = match self.curr.as_ref().unwrap() {
+            MailBodyStructure::Single { part_spec, .. } => {
+                let mut part_spec = part_spec.clone();
+                let mut next: Option<MailBodyStructure> = None;
+                while let Some(next_parent) = self.path.pop() {
+                    let index_within = part_spec.pop();
+                    if index_within.is_none() { break; }
+                    let index_within = index_within.unwrap() - 1;
+                    
+                    match &next_parent {
+                        MailBodyStructure::Multi { parts: next_parent_parts, .. } => {
+                            self.path.push(next_parent.clone());
+                            next = Some(next_parent_parts[index_within as usize + 1].clone());
+                            break;
+                        },
+                        _ => { unreachable!("I am a dumbass if this panics haha {:?}", self) },
+                    }
+                }
+                next
+            },
+            MailBodyStructure::Multi { parts, .. } => {
+                self.path.push(curr.clone());
+                parts.get(0).cloned()
+            },
+        };
+        Some(curr)
     }
 }
 

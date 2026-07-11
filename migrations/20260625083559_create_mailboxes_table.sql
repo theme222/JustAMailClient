@@ -4,10 +4,11 @@ CREATE TABLE IF NOT EXISTS mailboxes (
     account_id INTEGER NOT NULL,
     name TEXT NOT NULL,
     uid_validity INTEGER NOT NULL,
+    highest_modseq INTEGER NOT NULL,
     flags BLOB NOT NULL, -- JSONB
-    type TEXT NOT NULL, -- TBD
+    ty TEXT NOT NULL, -- TBD
     FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
-);
+) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_mailboxes_account_id ON mailboxes (account_id);
 
@@ -17,4 +18,4 @@ CREATE TABLE IF NOT EXISTS mailboxes_messages ( -- Many mailboxes to Many messag
     PRIMARY KEY (mailbox_id, message_id),
     FOREIGN KEY (mailbox_id) REFERENCES mailboxes(id) ON DELETE CASCADE,
     FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
-);
+) STRICT;

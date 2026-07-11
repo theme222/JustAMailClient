@@ -6,7 +6,7 @@ use crate::{models::*, net::fetch::imap::MailFlag};
 
 #[derive(Debug)]
 pub enum SrvAction {
-    SYNCEMAIL(async_imap::types::Fetch),
+    SYNCLISTEMAIL(async_imap::types::Fetch),
     SYNCMAILBOX(net::fetch::imap::Mailbox),
     LISTEMAILS,
     IDLENEWEMAIL,
@@ -22,15 +22,14 @@ pub struct SrvMessage {
 pub struct SrvActor {
     db_pool: sqlx::SqlitePool,
     inbox: tokio::sync::mpsc::Receiver<SrvMessage>,
-    senders: Senders,
 }
 
 impl SrvActor {
-    pub async fn new(inbox: tokio::sync::mpsc::Receiver<SrvMessage>, senders: Senders) -> Self {
+    pub async fn new(inbox: tokio::sync::mpsc::Receiver<SrvMessage>) -> Self {
         let db_pool = sql::initialize_database().await.unwrap();
         
         // ensure at least one account exists for now
-        Self { db_pool, inbox, senders, }
+        Self { db_pool, inbox }
     }
 
     pub async fn run(&mut self) {
@@ -42,9 +41,15 @@ impl SrvActor {
             // println!("Doing action: {:?}", msg.action);
             
             match msg.action {
-                SYNCEMAIL(mail) => { self.run_sync_email(mail).await; }
-                SYNCMAILBOX(mb) => { self.run_sync_mailbox(mb).await; }
-                LISTEMAILS => { self.run_list_emails().await; }
+                SYNCLISTEMAIL(mail) => { 
+                    tokio::spawn(SrvActor::run_sync_email(mail, self.db_pool.clone())); 
+                }
+                SYNCMAILBOX(mb) => { 
+                    tokio::spawn(SrvActor::run_sync_mailbox(mb, self.db_pool.clone()));
+                }
+                LISTEMAILS => { 
+                    tokio::spawn(SrvActor::run_list_emails(self.db_pool.clone())); 
+                }
                 SHUTDOWN => { break; }
                 _ => { println!("Action not implemented: {:?}", msg.action)}
             }
@@ -53,30 +58,28 @@ impl SrvActor {
         println!("Ending srv actor");
     }
 
-    pub async fn run_sync_mailbox(&mut self, mb: net::fetch::imap::Mailbox) { // Sync flags and uid_validity
+    pub async fn run_sync_mailbox(mb: net::fetch::imap::Mailbox, db_pool: sqlx::SqlitePool) { // Sync flags and uid_validity
         let res = sqlx::query!("
             SELECT uid_validity 
             FROM mailboxes 
             WHERE name = ?
             AND account_id = 1
             ", mb.name
-        )
-            .fetch_all(&self.db_pool)
-            .await
-            .unwrap();
+        ).fetch_all(&db_pool).await.unwrap();
         
         if res.len() == 0 {
             sqlx::query!("
-                INSERT INTO mailboxes (account_id, name, uid_validity, flags, type)
+                INSERT INTO mailboxes (account_id, name, uid_validity, highest_modseq, flags, ty)
                 VALUES (
                     ?,  -- account_id
                     ?,  -- name
                     ?,  -- uid_validity
+                    ?,  -- highest_modseq
                     jsonb(?),  -- flags
-                    ?   -- type
+                    ?   -- ty
                 )
-                ", 1, mb.name, mb.uid_validity.unwrap_or_default(), serde_json::to_string(&mb.flags).unwrap(), ""
-            );
+                ", 1, mb.name, mb.uid_validity.unwrap_or_default(), mb.highest_modseq.unwrap_or_default() as i64, serde_json::to_string(&mb.flags).unwrap(), ""
+            ).execute(&db_pool).await.unwrap();
         }
         else {
             // TODO: If uid_validity is different, invalidate all messages' uids 
@@ -85,62 +88,30 @@ impl SrvActor {
                 SET uid_validity = ?, flags = jsonb(?)
                 WHERE name = ? AND account_id = 1
                 ", mb.uid_validity.unwrap_or_default(), serde_json::to_string(&mb.flags).unwrap(), mb.name
-            );
+            ).execute(&db_pool).await.unwrap();
         }
         
         
     }
     
-    pub async fn run_sync_email(&mut self, mail: async_imap::types::Fetch) {
+    pub async fn run_sync_email(mail: async_imap::types::Fetch, db_pool: sqlx::SqlitePool) {
         println!("Saving email {}", mail.message);
-        let account_id = 1;
-        let ty = "";
-        let flags = mail
-            .flags()
-            .collect::<Vec<_>>()
-            .into_iter()
-            .map(|f| f
-            .into())
-            .collect::<Vec<MailFlag>>();
-        let flags = serde_json::to_string(&flags).unwrap();
-        let size = mail.size.unwrap();
-        let internal_date = mail.internal_date().unwrap().timestamp_millis();                    
-        let bodystructure: net::structure::MailBodyStructure = mail.bodystructure().unwrap().into();
-        let bodystructure = serde_json::to_string(&bodystructure).unwrap();
-        let imap_uid = mail.uid.unwrap();
-        let body_bytes = mail.text().unwrap_or_default();
-        let body_preview = net::structure::get_preview_from_partial(&body_bytes, mail.bodystructure().unwrap());
-        let body_raw = if size > MAX_PREVIEW_SIZE { None } else { Some(body_bytes) };
-        
-        sqlx::query!("
-            INSERT INTO messages (account_id, type, last_sync_time, flags, size, internal_date, bodystructure, imap_uid, body_preview, body_raw) 
-            VALUES (
-                ?, -- account_id
-                ?, -- type
-                ?, -- last_sync_time
-                jsonb(?), -- flags 
-                ?, -- size 
-                ?, -- internal_date
-                jsonb(?), -- bodystructure
-                ?,  -- imap_uid
-                ?,  -- body_preview
-                ?  -- body_raw
-            )", 
-            account_id, ty, unix_timestamp(), flags, size, internal_date, bodystructure, imap_uid, body_preview, body_raw
-        )
-        .execute(&self.db_pool)
-        .await
-        .unwrap();
+        sql::insert_or_update_message(&db_pool, mail.into()).await.unwrap();
     }
 
-    pub async fn run_list_emails(&self) {
-        let messages = sqlx::query!("SELECT * FROM messages")
-            .fetch_all(&self.db_pool)
-            .await
-            .unwrap();
+    pub async fn run_list_emails(db_pool: sqlx::Pool<sqlx::Sqlite>) {
+        // let messages = sqlx::query("
+        //     SELECT bodystructure
+        //     FROM messages
+        //     LIMIT 2
+        //     ")
+        //     .fetch_all(&db_pool)
+        //     .await
+        //     .unwrap();
         
-        for message in messages {
-            println!("{:?}", message);
-        }
+        // for message in messages {
+        //     println!("{:?}", message);
+        // }
+        db::sql::select_messages(&db_pool).await.unwrap();
     }
 }

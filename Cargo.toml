@@ -17,11 +17,12 @@ lettre = { version = "0.11.22", features = ["tokio1", "tokio1-native-tls", "buil
 mailparse = "0.16.1"
 rfc2047-decoder = "1.1.2"
 serde = "1.0.228"
-serde_json = "1.0.150"
+serde_json = { version = "1.0.150", features = ["raw_value"] }
 sqlx = { version = "0.9.0", features = ["sqlite", "runtime-tokio"] }
 stop-token = "0.7.0"
 tokio = { version = "1.52.3", features = ["full"] }
 tokio-util = { version = "0.7.18", features = ["compat"] }
+phf = { version = "0.11", features = ["macros"] }
 
 [lints.rust]
 unused = "allow"
