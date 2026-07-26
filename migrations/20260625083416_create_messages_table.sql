@@ -3,7 +3,6 @@ CREATE TABLE IF NOT EXISTS messages (
     /* Internal Fields */
     id INTEGER PRIMARY KEY AUTOINCREMENT, -- Unique message id number 5,937,510
     account_id INTEGER NOT NULL, -- id of the account this message was sent from / recieved from
-    ty TEXT, -- TBD
     last_sync_time INTEGER NOT NULL,
     last_query_time INTEGER,
     /* Internal Fields */
@@ -35,6 +34,7 @@ CREATE TABLE IF NOT EXISTS messages (
     body_preview TEXT NOT NULL, -- CONST First 8192 bytes of the body fully parsed and extracted only useful content (used for previews and searching)
     /* Body Fields */
     FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE CASCADE
+    UNIQUE (account_id, imap_uid)
     -- CANDIDATE KEY (account_id, imap_uid, mailbox.uid_validity)
 ) STRICT;
 

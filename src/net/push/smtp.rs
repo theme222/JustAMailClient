@@ -20,7 +20,8 @@ pub async fn get_mailer(credentials: &Credentials) -> Result<AsyncSmtpTransport<
     )
 }
 
-pub async fn send_test_email(credentials: Credentials) -> Result<()> {
+pub async fn send_test_email(cred_id: CredentialID) -> Result<()> {
+    let credentials = CredentialStore::get(cred_id);
     let email = Message::builder()
         .from(credentials.login.parse().unwrap())
         .to(TEST_MAIL_DEST.parse().unwrap())
@@ -42,7 +43,9 @@ pub async fn send_test_email(credentials: Credentials) -> Result<()> {
     Ok(())
 }
 
-pub async fn send_echo_email(credentials: Credentials) -> Result<()> {
+pub async fn send_echo_email(cred_id: CredentialID) -> Result<()> {
+    let credentials = CredentialStore::get(cred_id);
+    
     let email = Message::builder()
         .from(credentials.login.parse().unwrap())
         .to(credentials.login.parse().unwrap())

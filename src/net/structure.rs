@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::collections::*;
+use crate::models::*;
 
 pub fn content_encoding_to_string(encoding: &imap_proto::ContentEncoding) -> String {
     use imap_proto::ContentEncoding::*;
@@ -11,18 +12,6 @@ pub fn content_encoding_to_string(encoding: &imap_proto::ContentEncoding) -> Str
         Base64 => "base64".into(),
         Other(v) => v.clone().into(),
     }
-}
-
-
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, Default)]
-pub struct BodyHeaders {
-    pub content_type: String,
-    pub content_subtype: String,
-    pub content_params: std::collections::HashMap<String, String>,
-    pub disposition: Option<String>,
-    pub disposition_params: std::collections::HashMap<String, String>,
-    // pub language: Vec<String>,
-    // pub location: Option<String>,
 }
 
 impl From<&imap_proto::BodyContentCommon<'_>> for BodyHeaders {
@@ -44,87 +33,12 @@ impl From<&imap_proto::BodyContentCommon<'_>> for BodyHeaders {
     }
 }
 
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, Default)]
-pub struct BodyContent {
-    pub id: Option<String>,
-    // pub md5: Option<String>,
-    // pub description: Option<String>,
-    pub transfer_encoding: String,
-    pub size_octects: u32,
-}
-
 impl From<&imap_proto::BodyContentSinglePart<'_>> for BodyContent {
     fn from(value: &imap_proto::BodyContentSinglePart<'_>) -> Self {
         BodyContent {
             id: value.id.clone().map(|s| s.to_string()),
             transfer_encoding: content_encoding_to_string(&value.transfer_encoding),
             size_octects: value.octets,
-        }
-    }
-}
-
-
-// I'm ignoring BodyExtension for now
-// My version of imap_proto::BodyStructure
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
-pub enum MailBodyStructure { 
-    Single {
-        headers: BodyHeaders,
-        content: BodyContent,
-        part_spec: Vec<u32>,
-    },
-    Multi {
-        headers: BodyHeaders,
-        parts: Vec<MailBodyStructure>,
-        part_spec: Vec<u32>,
-    }
-}
-
-impl MailBodyStructure {
-    fn from_imap_proto_rec(value: &imap_proto::BodyStructure, section_id: Vec<u32>) -> Self {
-        use imap_proto::BodyStructure::*;
-        use MailBodyStructure::*;
-        match value {
-            Basic { common, other, extension } =>  { 
-                Single {  headers: common.into(),  content: other.into(), part_spec: section_id } 
-            }
-            Text { common, other, lines, extension } => { 
-                Single {  headers: common.into(),  content: other.into(), part_spec: section_id } 
-            }
-            Message { common, other, envelope, body, lines, extension } =>
-                { todo!("Uh oh") }
-            Multipart { common, bodies, extension } => {
-                Multi { 
-                    headers: common.into(),
-                    parts: bodies
-                        .into_iter()
-                        .enumerate()
-                        .map(|(i, p)| {
-                            let mut section_id = section_id.clone();
-                            section_id.push((i+1).try_into().unwrap());
-                            MailBodyStructure::from_imap_proto_rec(p, section_id)
-                        })
-                        .collect(),
-                    part_spec: section_id,
-                } 
-            }
-        }
-    }
-
-    pub fn get_part_spec_str(&self) -> String {
-        match self {
-            MailBodyStructure::Single { part_spec, .. } => part_spec,
-            MailBodyStructure::Multi { part_spec, .. } => part_spec,
-        }.iter().map(ToString::to_string).collect::<Vec<_>>().join(".")
-    }
-}
-
-impl Default for MailBodyStructure {
-    fn default() -> Self {
-        MailBodyStructure::Single {
-            headers: BodyHeaders::default(),
-            content: BodyContent::default(),
-            part_spec: vec![],
         }
     }
 }

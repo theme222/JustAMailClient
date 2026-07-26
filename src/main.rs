@@ -3,8 +3,6 @@ mod srv;
 mod models;
 mod init;
 mod gui;
-mod consts;
-mod funcs;
 
 use std::{collections::BTreeMap, io::Write};
 
@@ -18,8 +16,10 @@ use srv::*;
 #[tokio::main]
 async fn main() {
     let res = runner().await;
+    // let res = test_decode().await;
     if let Err(e) = res { eprintln!("Error: {}", e); }
 }
+
 
 async fn test_decode() -> Result<()> {
     let raw_data = std::fs::read(std::path::Path::new("sample/partial.eml")).unwrap();
@@ -47,18 +47,28 @@ async fn runner() -> Result<()> {
     delete_database_if_exists();
     ensure_project_dir_structure()?;
     dotenvy::dotenv()?;
-    
-    let imap_server = std::env::var("ICLOUD_IMAP_SERVER").context("ICLOUD_IMAP_SERVER not set")?;
-    let smtp_server = std::env::var("ICLOUD_SMTP_SERVER").context("ICLOUD_SMTP_SERVER not set")?;
-    let login = std::env::var("ICLOUD_EMAIL").context("ICLOUD_EMAIL not set")?;
-    let password = std::env::var("ICLOUD_PASSWORD").context("ICLOUD_PASSWORD not set")?;
+
+    let service = "AOL";
+    let imap_server_str = format!("{}_IMAP_SERVER", service);
+    let smtp_server_str = format!("{}_SMTP_SERVER", service);
+    let login_str = format!("{}_EMAIL", service);
+    let password_str = format!("{}_PASSWORD", service);
+     
+    let imap_server = std::env::var(imap_server_str).context("IMAP_SERVER not set")?;
+    let smtp_server = std::env::var(smtp_server_str).context("SMTP_SERVER not set")?;
+    let login = std::env::var(login_str).context("EMAIL not set")?;
+    let password = std::env::var(password_str).context("PASSWORD not set")?;
     
     let creds = Credentials {
         login: login,
         secret: password,
         fetch_server: imap_server,
         push_server: smtp_server,
+        auth_method: AuthMethod::LOGIN,
+        encryption_method: EncryptionMethod::SSLTLS,
     };
+
+    let cred_id = CredentialStore::insert(creds);
 
     let (net_sender, net_receiver) = tokio::sync::mpsc::channel::<net::NetMessage>(100);
     let (srv_sender, srv_receiver) = tokio::sync::mpsc::channel::<srv::SrvMessage>(100);
@@ -81,24 +91,23 @@ async fn runner() -> Result<()> {
 
     // For now lets just treat this as a weird shell like interface (right now we are acting as the gui component)
     loop {
-        print!("Enter command (send, list, fetch, status, exit, echo): ");
-        std::io::stdout().flush()?;
         let mut input = String::new();
         std::io::stdin().read_line(&mut input)?;
         let input = input.trim();
 
         match input {
-            "send" => { Senders::net(NetMessage {action: NetAction::SEND(creds.clone()) }).await; }
-            "echo" => { Senders::net(NetMessage {action: NetAction::ECHO(creds.clone()) }).await; }
-            "fetch" => { Senders::net(NetMessage {action: NetAction::LISTFETCH(creds.clone())}).await; }
-            "status" => { Senders::net(NetMessage {action: NetAction::STATUS(creds.clone())}).await; }
+            "send" => { Senders::net(NetMessage {cred_id, action: NetAction::SEND}).await; }
+            "echo" => { Senders::net(NetMessage {cred_id, action: NetAction::ECHO}).await; }
+            "fetch" => { Senders::net(NetMessage {cred_id, action: NetAction::LISTFETCH}).await; }
+            "status" => { Senders::net(NetMessage {cred_id, action: NetAction::STATUS}).await; }
             "list" => { Senders::srv(SrvMessage {action: SrvAction::LISTEMAILS}).await; }
+            "help" => { println!("Available commands: send, echo, fetch, status, list, help, exit"); }
             "exit" => { break; }
             _ => { println!("Unknown command: {}", input); }
         }
     }
     
-    Senders::net(NetMessage {action: NetAction::SHUTDOWN}).await; 
+    Senders::net(NetMessage {cred_id, action: NetAction::SHUTDOWN}).await; 
     Senders::srv(SrvMessage {action: SrvAction::SHUTDOWN}).await;
     
     Ok(())
