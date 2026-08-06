@@ -16,13 +16,19 @@ pub fn get_download_time(byte_count: u64, download_speed_mbps: f64) -> f64 {
     byte_count as f64 / (download_speed_mbps / 8.0 * 1e6)
 }
 
-pub fn spawn_handle_err<F: std::future::Future<Output = Result<()>> + Send + 'static>(future: F, context: &'static str) {
-    tokio::spawn(await_handle_err(future, context));
+pub fn spawn_handle_err<F: std::future::Future<Output = Result<Resolution>> + Send + 'static>(future: F, context: &'static str, res_id: ResolveID) {
+    tokio::spawn(await_handle_err(future, context, res_id));
 }
 
-pub async fn await_handle_err(future: impl std::future::Future<Output = Result<()>>, context: &str) {
+pub async fn await_handle_err(future: impl std::future::Future<Output = Result<Resolution>>, context: &str, res_id: ResolveID) {
     let res = future.await;
-    if let Err(e) = res { eprintln!("[ERR] {}: {}", context, e); }
+    if let Err(e) = res { 
+        eprintln!("[ERR] {}: {}", context, e); 
+        ResolveStore::fail(res_id, e);
+    }
+    else if let Ok(res) = res {
+        ResolveStore::resolve(res_id, res);
+    }
 }
 
 pub fn with_jitter(duration: std::time::Duration) -> std::time::Duration {

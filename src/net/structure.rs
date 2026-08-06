@@ -173,10 +173,10 @@ pub fn body_as_bytes(body: &mailparse::body::Body) -> Vec<u8> {
 //     }.unwrap_or("!! Could not decode this section !!".into())
 // }
 
-pub fn get_preview_from_partial(raw_partial: &[u8], bs: &imap_proto::BodyStructure) -> String {
+pub fn get_preview_from_partial(raw_partial: &[u8]) -> Option<String> {
     let parsed = mailparse::parse_mail(raw_partial);  
 
-    if let Err(e) = parsed { return "!! Could not parse this body !!".into(); };
+    if let Err(e) = parsed { return None; };
     let parsed = parsed.unwrap();
 
     let mut result_str = String::new();
@@ -188,5 +188,5 @@ pub fn get_preview_from_partial(raw_partial: &[u8], bs: &imap_proto::BodyStructu
         }
     }
     
-    result_str
+    Some(result_str)
 }

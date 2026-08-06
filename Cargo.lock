@@ -11,6 +11,7 @@ dependencies = [
  "async-native-tls",
  "async-trait",
  "bitflags",
+ "constcat",
  "directories",
  "dotenvy",
  "futures",
@@ -413,6 +414,12 @@ checksum = "4ca0197aee26d1ae37445ee532fefce43251d24cc7c166799f4d46817f1d3973"
 dependencies = [
  "crossbeam-utils",
 ]
+
+[[package]]
+name = "constcat"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "136d3e02915a2cea4d74caa8681e2d44b1c3254bdbf17d11d41d587ff858832c"
 
 [[package]]
 name = "core-foundation"

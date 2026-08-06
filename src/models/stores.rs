@@ -1,7 +1,9 @@
 // Mutex-protected stores for the application state (slower to access than globals cause mutex)
-use std::sync::Mutex;
+use std::{panic, sync::Mutex};
 
-use crate::srv;
+use crate::{models::Senders, srv::{self}};
+use crate::db::types::{SQLKey, SQLObj};
+use anyhow::Result;
 
 static ID_STORE: Mutex<IDStore> = Mutex::new(IDStore { next_cmd_id: 0, next_s_id: 0 });
 
@@ -28,38 +30,86 @@ impl IDStore {
 static CREDENTIAL_STORE: Mutex<std::sync::LazyLock<CredentialStore>> = Mutex::new(std::sync::LazyLock::new(|| CredentialStore::new()));
 
 pub struct CredentialStore {
-    hs : Vec<super::Credentials>,
+    hm : std::collections::HashMap<super::CredentialID, super::Credentials>,
+    next_cred_id: super::CredentialID,
 }
 
 impl CredentialStore {
     fn new() -> Self {
-        Self { hs: Vec::new(), }
+        Self { hm: std::collections::HashMap::new(), next_cred_id: 0 }
     }
-    pub fn insert(creds: super::Credentials) -> u64 {
+    pub async fn insert(creds: super::Credentials) -> u64 {
         let mut store = CREDENTIAL_STORE.lock().unwrap();
-        store.hs.push(creds);
-        store.hs.len() as u64 - 1
+        let id = store.next_cred_id;
+        store.next_cred_id += 1;
+        drop(store);
+        use srv::*;
+        let res_id = ResolveStore::make();
+        let (local_part, domain) = creds.login.split_once('@').unwrap_or((&creds.login, ""));
+        
+        Senders::srv(
+            SrvMessage { 
+                action: SrvAction::SYNCACCOUNT { acc: db::AccountSQL {
+                    id: Some(db::KeyWrapper(db::AccountKey::LOCALPARTDOMAIN(local_part.into(), domain.into()))),
+                    create_time: None,
+                    update_time: None,
+                    local_part: Some(local_part.into()),
+                    domain: Some(domain.into()),
+                    fetch_server: Some(creds.fetch_server.clone()),
+                    push_server: Some(creds.push_server.clone()),
+                }},
+                resolve: res_id,
+            }
+        ).await;
+        
+        let resolution = ResolveStore::receive(res_id).await.unwrap();
+        let account_sql = match resolution {
+            Resolution::AccountSQL(account_sql) => account_sql,
+            Resolution::Nothing => panic!("No resolution found for ResolveID: {}", res_id),
+            _ => panic!("Unexpected resolution: {:?}", resolution),
+        };
+        
+        let mut store = CREDENTIAL_STORE.lock().unwrap();
+        store.hm.insert(id, creds);
+        id
     }
     pub fn get(id: u64) -> super::Credentials {
         if id == u64::MAX { panic!("CredentialStore::get called on u64::MAX"); }
-        CREDENTIAL_STORE.lock().unwrap().hs.get(id as usize).cloned().unwrap()
+        CREDENTIAL_STORE.lock().unwrap().hm.get(&id).cloned().unwrap()
     }
+    // pub fn get_account_id(id: u64) -> srv::db::SqliteID {
+    //     if id == u64::MAX { panic!("CredentialStore::get called on u64::MAX"); }
+    //     CREDENTIAL_STORE.lock().unwrap().hm.get(&id).cloned().unwrap().1
+    // }
+    // pub fn invalidate_account_id(id: srv::db::SqliteID) {
+    //     // I honestly don't really like the way I structured this but I can't think of a better way right now.
+    //     for (cred_id, (_, acc_id)) in CREDENTIAL_STORE.lock().unwrap().hm.iter() {
+    //         if *acc_id == id {
+    //             CREDENTIAL_STORE.lock().unwrap().hm.remove(&cred_id);
+    //             break;
+    //         }
+    //     }
+    // }
 }
 
 static APP_STATE_STORE: std::sync::LazyLock<AppStateStore> = std::sync::LazyLock::new(|| AppStateStore::init());
 
-struct AppStateStore {
+pub struct AppStateStore {
     recv: tokio::sync::watch::Receiver<AppState>,
     sender: tokio::sync::watch::Sender<AppState>,
 }
 
 impl AppStateStore {
-    fn init() -> AppStateStore {
-        let (send, recv) = tokio::sync::watch::channel(AppState::ACTIVE);
+    pub fn init() -> AppStateStore {
+        let (send, recv) = tokio::sync::watch::channel(AppState::INACTIVE);
         AppStateStore {
             recv: recv,
             sender: send,
         }
+    }
+
+    pub fn change(state: AppState) {
+        APP_STATE_STORE.sender.send(state);
     }
 }
 
@@ -87,4 +137,78 @@ impl AppState { // kinda braindead but good enough
     }
 }
 
+pub type Resolve = anyhow::Result<Resolution>;
 
+#[derive(Debug)]
+pub enum Resolution {
+    Nothing,
+    MailboxSQL(crate::db::MailboxSQL),
+    MessageAndPartSQL(Vec<crate::db::MessageSQL>, Vec<crate::db::MessagePartSQL>),
+    MessageSQL(crate::db::MessageSQL),
+    MessagePartSQL(crate::db::MessagePartSQL),
+    AccountSQL(crate::db::AccountSQL),
+    Status(Vec<(crate::net::fetch::imap::ImapSessionId, crate::Status)>),
+}
+
+pub type Resolver = Option<tokio::sync::oneshot::Sender<anyhow::Result<Resolution>>>;
+pub type Resolvee = Option<tokio::sync::oneshot::Receiver<anyhow::Result<Resolution>>>;
+pub type ResolveID = u64;
+
+pub struct ResolveStore {
+    resolve_count: ResolveID,
+    hashmap: std::collections::HashMap<ResolveID, (Resolvee, Resolver)>,
+}
+
+pub const NULL_RESOLVE_ID: ResolveID = u64::MAX;
+
+impl ResolveStore {
+    pub fn new() -> Self {
+        Self {
+            resolve_count: 0,
+            hashmap: std::collections::HashMap::new(),
+        }
+    }
+
+    pub fn make() -> ResolveID {
+        let mut store = RESOLVE_STORE.lock().unwrap();
+        let id = store.resolve_count;
+        let (rx, tx) = tokio::sync::oneshot::channel::<Resolve>();
+        store.hashmap.insert(id, (Some(tx), Some(rx)));
+        store.resolve_count += 1;
+        id
+    }
+
+    pub fn delete_if_resolved(id: ResolveID) {
+        let mut store = RESOLVE_STORE.lock().unwrap();
+        if let Some((None, None)) = store.hashmap.get(&id) { store.hashmap.remove(&id); }
+    }
+
+    pub fn resolve(id: ResolveID, resolution: Resolution) {
+        if id == NULL_RESOLVE_ID { return }
+        if let Some((_, tx)) = RESOLVE_STORE.lock().unwrap().hashmap.get_mut(&id) {
+            tx.take().expect(format!("ResolveID: {} has already been resolved", id).as_str()).send(Resolve::Ok(resolution));
+        }
+        else { panic!("ResolveID: {} not found", id) }
+        Self::delete_if_resolved(id);
+    }
+
+    pub fn fail(id: ResolveID, error: anyhow::Error) {
+        if id == NULL_RESOLVE_ID { return }
+        if let Some((_, tx)) = RESOLVE_STORE.lock().unwrap().hashmap.get_mut(&id) {
+            tx.take().expect(format!("ResolveID: {} has already been resolved", id).as_str()).send(Resolve::Err(error));
+        }
+        else { panic!("ResolveID: {} not found", id) }
+        Self::delete_if_resolved(id);
+    }
+
+    pub async fn receive(id: ResolveID) -> Resolve {
+        if let Some((rx, _)) = RESOLVE_STORE.lock().unwrap().hashmap.get_mut(&id) {
+            let rx = rx.take().expect(format!("ResolveID: {} has already been resolved", id).as_str());
+            Self::delete_if_resolved(id);
+            rx.await.expect("Ima be honest to ya I have no idea how this would even error")
+        } 
+        else { panic!("ResolveID: {} not found", id) }
+    }
+}
+
+static RESOLVE_STORE: Mutex<std::sync::LazyLock<ResolveStore>> = Mutex::new(std::sync::LazyLock::new(|| ResolveStore::new()));

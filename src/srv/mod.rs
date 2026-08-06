@@ -1,25 +1,39 @@
 pub mod db;
+use std::fs::TryLockError::Error;
+
 use db::sql;
 use crate::net;
 
 use crate::models::*;
+use db::types::*;
+
 
 #[derive(Debug)]
 pub enum SrvAction {
-    SYNCLISTEMAIL(CredentialID, MailboxName, async_imap::types::Fetch),
-    SYNCFULLEMAIL(CredentialID, MailboxName, async_imap::types::Fetch),
-    SYNCEMAILSECTION(CredentialID, MailboxName, Vec<MailBodyStructure>, async_imap::types::Fetch),
-    SYNCMAILBOX(CredentialID, Mailbox),
+    SYNCEMAIL{
+        msg: MessageSQL,
+    },
+    SYNCEMAILSECTION{
+        part: MessagePartSQL,
+    },
+    SYNCMAILBOX{
+        mb: MailboxSQL,
+    },
+    SYNCACCOUNT { acc: AccountSQL },
     LISTEMAILS,
-    IDLENEWEMAIL,
-    IDLEEXPUNGED,
+    // IDLENEWEMAIL,
+    // IDLEEXPUNGED,
     SHUTDOWN,
+    QUERYACCOUNT { acc: AccountSQL, },
+    QUERYMAILBOX { mb: MailboxSQL, },
+    QUERYMESSAGE { msg: MessageSQL, },
+    QUERYMESSAGEPART { part: MessagePartSQL, },
 }
 
 pub struct SrvMessage {
     pub action: SrvAction,
+    pub resolve: ResolveID, // Incase you want to hook onto whether the action succeeded or failed
 }
-
 
 pub struct SrvActor {
     db_pool: sqlx::SqlitePool,
@@ -40,88 +54,91 @@ impl SrvActor {
         use SrvAction::*;
         
         while let Some(msg) = self.inbox.recv().await {
-            // println!("Doing action: {:?}", msg.action);
             
-            match msg.action { // Maybe consider removing the tokio::spawn for writing actions.
-                SYNCFULLEMAIL(cred_id, mb, mail) => { // Writing action
-                    await_handle_err(SrvActor::run_sync_full_email(cred_id, mb, mail, self.db_pool.clone()), "Syncing full email").await;
+            // Writing actions use await_handle_err to prevent race conditions (like having a mail part pointing to a mail that doesn't exist in the database yet.)
+            let res_id = msg.resolve;
+            match msg.action { 
+                SYNCEMAIL { msg } => { // Writing action 
+                    await_handle_err(SrvActor::run_sync_email(msg, self.db_pool.clone()), "Syncing list email", res_id).await;
                 },
-                SYNCLISTEMAIL(cred_id, mb, mail) => { // Writing action 
-                    await_handle_err(SrvActor::run_sync_list_email(cred_id, mb, mail, self.db_pool.clone()), "Syncing list email").await;
+                SYNCEMAILSECTION { part } => { // Writing action
+                    await_handle_err(SrvActor::run_sync_email_section(part, self.db_pool.clone()), "Syncing email section", res_id).await;
+                }
+                SYNCMAILBOX { mb } => { // Writing action
+                    await_handle_err(SrvActor::run_sync_mailbox(mb, self.db_pool.clone()), "Syncing mailbox", res_id).await;
+                }
+                SYNCACCOUNT { acc } => { // Writing action
+                    await_handle_err(SrvActor::run_sync_account(acc, self.db_pool.clone()), "Syncing account", res_id).await;
                 },
-                SYNCEMAILSECTION(cred_id, mb, bs, mail) => { // Writing action
-                    await_handle_err(SrvActor::run_sync_email_section(cred_id, mb, bs, mail, self.db_pool.clone()), "Syncing email section").await;
-                }
-                SYNCMAILBOX(cred_id, mb) => { // Writing action
-                    await_handle_err(SrvActor::run_sync_mailbox(cred_id, mb, self.db_pool.clone()), "Syncing mailbox").await;
-                }
                 LISTEMAILS => { // Reading action
-                    spawn_handle_err(SrvActor::run_list_emails(self.db_pool.clone()), "Listing emails");
+                    spawn_handle_err(SrvActor::run_list_emails(self.db_pool.clone()), "Listing emails", res_id);
                 }
                 SHUTDOWN => { break; }
-                _ => { println!("Action not implemented: {:?}", msg.action)}
+                // _ => { println!("Action not implemented: {:?}", msg.action)}
+                QUERYACCOUNT { acc } => {
+                    spawn_handle_err(SrvActor::run_query_account(self.db_pool.clone(), msg.resolve, acc), "Querying account", res_id);
+                },
+                QUERYMAILBOX { mb } => todo!(),
+                QUERYMESSAGE { msg } => todo!(),
+                QUERYMESSAGEPART { part } => todo!(),
             }
         }
 
         println!("Ending srv actor");
     }
 
-    pub async fn run_sync_mailbox(cred_id: CredentialID, mb: Mailbox, db_pool: sqlx::SqlitePool) -> Result<()> { // Sync flags and uid_validity
+    pub async fn run_sync_account(acc: AccountSQL, db_pool: sqlx::SqlitePool) -> Result<Resolution> {
         let mut db_tx = db_pool.begin().await?;
-        sql::upd_mailbox(&mut db_tx, mb, cred_id).await?;
+        acc.upsert(&mut db_tx).await?;
+        let acc_after = acc.find(&mut db_tx).await?;
         db_tx.commit().await?;
-        Ok(())
+        Ok(Resolution::AccountSQL(acc_after.ok_or(anyhow::anyhow!("Failed to find account after upsert"))?))
+    }
+
+    pub async fn run_sync_mailbox(mb: MailboxSQL, db_pool: sqlx::SqlitePool) -> Result<Resolution> { // Sync flags and uid_validity
+        let mut db_tx = db_pool.begin().await?;
+        mb.upsert(&mut db_tx).await?;
+        let mb_after: Option<MailboxSQL> = mb.find(&mut db_tx).await?;
+        db_tx.commit().await?;
+        Ok(Resolution::MailboxSQL(mb_after.ok_or(anyhow::anyhow!("Failed to find mailbox after upsert"))?))
     }
     
-    pub async fn run_sync_list_email(cred_id: CredentialID, mb: MailboxName, mail: async_imap::types::Fetch, db_pool: sqlx::SqlitePool) -> Result<()> {
-        println!("Saving email {}", mail.message);
+    pub async fn run_sync_email(mail: MessageSQL, db_pool: sqlx::SqlitePool) -> Result<Resolution> {
+        println!("Saving email {:?}", mail.id);
 
         let mut db_tx = db_pool.begin().await?;
-        let mut mail: Message = mail.into();
-        // Invalidate body_raw for large mails  
-        mail.body_raw = if mail.size > MAX_LISTFETCH_SIZE as i64 { None } else { mail.body_raw };
-        sql::upd_messages(&mut db_tx, mail).await?;
+        mail.upsert(&mut db_tx).await?;
+        let msg_after: Option<MessageSQL> = mail.find(&mut db_tx).await?;
         db_tx.commit().await?;
-        Ok(())
+        Ok(Resolution::MessageSQL( msg_after.ok_or(anyhow::anyhow!("Failed to find message after upsert"))? ))
     }
     
-    pub async fn run_sync_full_email(cred_id: CredentialID, mb: MailboxName, mail: async_imap::types::Fetch, db_pool: sqlx::SqlitePool) -> Result<()> {
-        println!("Saving email {}", mail.message);
-
-        let mut db_tx = db_pool.begin().await?;
-        sql::upd_messages(&mut db_tx, mail.into()).await?;
-        db_tx.commit().await?;
-        Ok(())
-    }
-
-    pub async fn run_sync_email_section(cred_id: CredentialID, mb: MailboxName, bs: Vec<MailBodyStructure>, mail: async_imap::types::Fetch, db_pool: sqlx::SqlitePool) -> Result<()> {
-        println!("Saving email section");
+    pub async fn run_sync_email_section(part: MessagePartSQL, db_pool: sqlx::SqlitePool) -> Result<Resolution> {
+        println!("Saving email section {:?}", part.id);
         use imap_proto::types::{SectionPath::*, MessageSection};
         
-        let message_parts = bs
-            .clone()
-            .iter()
-            .map(|bs| 
-                (
-                    bs.part_spec_str(),
-                    mail.section(&Part(bs.part_spec().clone(), None))
-                )
-            )
-            .filter(|(_, section)| section.is_some())
-            .map(|(part_spec, section)| (part_spec, section.unwrap().to_vec()))
-            .collect::<Vec<_>>();
-
         let mut db_tx = db_pool.begin().await?;
-        sql::upd_message_parts(&mut db_tx, mail.into(), message_parts).await?;
+        part.upsert(&mut db_tx).await?;
+        let part_after = part.find(&mut db_tx).await?;
         db_tx.commit().await?;
-        Ok(())
+        Ok(Resolution::MessagePartSQL(part_after.ok_or(anyhow::anyhow!("Failed to find message part after upsert"))?))
     }
 
-    pub async fn run_list_emails(db_pool: sqlx::Pool<sqlx::Sqlite>) -> Result<()> {
+    pub async fn run_list_emails(db_pool: sqlx::Pool<sqlx::Sqlite>) -> Result<Resolution> {
         println!("Listing emails...");
         let mut db_tx = db_pool.begin().await?;
         db::sql::select_messages(&mut db_tx).await?;
         db_tx.commit().await?;
-        Ok(())
+        Ok(Resolution::Nothing)
+    }
+
+    pub async fn run_query_account(db_pool: sqlx::Pool<sqlx::Sqlite>, res_id: ResolveID, account_sql: AccountSQL) -> Result<Resolution> {
+        let mut db_tx = db_pool.begin().await?;
+        let account_sql = account_sql.find(&mut db_tx).await?;
+        db_tx.commit().await?;
+        println!("Query account: {:?}", account_sql);
+        if account_sql.is_none() { ResolveStore::resolve(res_id, Resolution::Nothing); }
+        else { ResolveStore::resolve(res_id, Resolution::AccountSQL(account_sql.unwrap())); }
+        Ok(Resolution::Nothing)
     }
 }

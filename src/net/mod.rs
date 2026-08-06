@@ -1,8 +1,9 @@
 use crate::net::fetch::imap::{ImapSessionCommandType::LISTFETCH, *};
 use crate::models::*;
 use std::sync::Arc;
+use imap_proto::parser::core::nstring_utf8;
 use tokio::sync::Mutex as TMutex;
-use futures::stream::{Stream, StreamExt};
+use futures::stream::{OrElse, Stream, StreamExt, Then};
 
 pub mod fetch;
 pub mod push;
@@ -22,25 +23,25 @@ pub enum SessionUpdate {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NetAction {
     /* External Use */
-    ECHO,
-    SEND,
-    LISTFETCH,
+    // ECHO { cred_id: CredentialID, }, // -> Ok
+    SEND { cred_id: CredentialID, }, // -> Ok
+    LISTFETCH { cred_id: CredentialID, }, // -> Ok
     // PREFETCH(CredentialID),
     // FETCH(CredentialID),
-    STATUS,
-    SUGGEST(MailboxName), // Give a hint to what the next action's domain will be. (This will *sometimes* call SELECT. Based on if there is an available session.)
-    POLL, // A general call to poll for new mail.
+    STATUS { cred_id: CredentialID, }, // -> Ok
+    SUGGEST { cred_id: CredentialID, mb: MailboxName }, // -> Ok
+    POLL, // -> None
     /* External Use */
     /* From ImapSession */
-    IMAPUPDATE(SessionUpdate),
+    IMAPUPDATE { cred_id: CredentialID, update: SessionUpdate }, // -> Ok or The resolution type of the retried action
     /* From ImapSession */
-    SHUTDOWN,
+    SHUTDOWN, // -> None
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct NetMessage {
-    pub cred_id: CredentialID, // on actions that don't use it the value will always be u64::MAX
     pub action: NetAction,
+    pub resolve: ResolveID, // Incase you want to hook onto whether the action succeeded or failed (and the result)
 }
 
 pub struct NetActor {
@@ -48,21 +49,6 @@ pub struct NetActor {
     managers: std::collections::HashMap<CredentialID, Arc<TMutex<Option<ImapManager>>>>,  
 }
 
-// pub async fn retry_network<T, Func, Fut>(action: Func) -> Result<T>
-// where 
-//     Func: Fn() -> Fut,
-//     Fut: std::future::Future<Output = Result<T>> + Send + 'static
-// {
-//     for _ in 0..RETRIES {
-//         let result = action().await; 
-//         match result {
-//             Ok(out) => { return Ok(out) }
-//             Err(e) => { println!("Failed! {:?} Retrying...", e); }
-//         }
-//         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-//     }
-//     panic!("Failed to execute network action after {} retries", RETRIES)
-// }
 
 impl NetActor {
     pub async fn new(inbox: tokio::sync::mpsc::Receiver<NetMessage>) -> Self {
@@ -75,15 +61,15 @@ impl NetActor {
         println!("Starting net actor");
         while let Some(msg) = self.inbox.recv().await {
             println!("Doing action: {:?}", msg.action);
-            let c = msg.cred_id; 
+            let res_id = msg.resolve;
             
             match msg.action {
-                ECHO => { tokio::spawn(push::smtp::send_echo_email(c)); }
-                SEND => { tokio::spawn(push::smtp::send_test_email(c)); }
-                LISTFETCH => { tokio::spawn(Self::run_list_fetch(self.get_manager_arc(c).await, c)); }
-                STATUS => { Self::run_status(self.get_manager_arc(c).await, c).await; }
-                IMAPUPDATE(session_update) => { Self::run_imap_update(self.get_manager_arc(c).await, c, session_update).await; }
-                SUGGEST(mb) => { Self::run_suggest(self.get_manager_arc(c).await, c, mb).await; }
+                // ECHO { cred_id } => { tokio::spawn(push::smtp::send_echo_email(cred_id)); }
+                SEND { cred_id } => { tokio::spawn(push::smtp::send_test_email(cred_id)); }
+                LISTFETCH { cred_id } => { tokio::spawn(Self::run_list_fetch(self.get_manager_arc(cred_id).await, cred_id, res_id)); }
+                STATUS { cred_id } => { tokio::spawn(Self::run_status(self.get_manager_arc(cred_id).await, cred_id, res_id)); }
+                IMAPUPDATE { cred_id, update } => { tokio::spawn(Self::run_imap_update(self.get_manager_arc(cred_id).await, cred_id, update, res_id)); }
+                SUGGEST { cred_id, mb } => { tokio::spawn(Self::run_suggest(self.get_manager_arc(cred_id).await, cred_id, mb, res_id)); }
                 POLL => {/* TODO Fill this bad boy in */},
                 SHUTDOWN => { break; }
                 // _ => { println!("Unknown action: {:?}", msg.action) }
@@ -107,13 +93,18 @@ impl NetActor {
         manager_mutex
     }
 
-    pub async fn run_list_fetch(manager_ref: Arc<TMutex<Option<ImapManager>>>, c: CredentialID) {
-        use fetch::imap::FetchType::*;
-        Self::get_manager_mutex(&manager_ref, c).await
-            .as_mut().unwrap().call_session(LISTFETCH("INBOX".into(), SeqRange::all())).await;
+    pub async fn run_send(cred_id: CredentialID, resolve: ResolveID) {
+        push::smtp::send_test_email(cred_id).await;
+        ResolveStore::resolve(resolve, Resolution::Nothing)
     }
 
-    pub async fn run_imap_update(manager_arc: Arc<TMutex<Option<ImapManager>>>, c: CredentialID, session_update: SessionUpdate) {
+    pub async fn run_list_fetch(manager_ref: Arc<TMutex<Option<ImapManager>>>, c: CredentialID, resolve: ResolveID) {
+        use fetch::imap::FetchType::*;
+        Self::get_manager_mutex(&manager_ref, c).await
+            .as_mut().unwrap().call_session(LISTFETCH("INBOX".into(), SeqRange::all()), resolve).await;
+    }
+
+    pub async fn run_imap_update(manager_arc: Arc<TMutex<Option<ImapManager>>>, c: CredentialID, session_update: SessionUpdate, res_id: ResolveID) {
         use SessionUpdate::*;
         let isid = match &session_update {
             STARTED(isid) => isid,
@@ -124,19 +115,20 @@ impl NetActor {
             SESSIONABORT(isid) => isid,
         };
         Self::get_manager_mutex(&manager_arc, c).await
-            .as_mut().unwrap().rcv_session_update(session_update).await;
+            .as_mut().unwrap().rcv_session_update(session_update, res_id).await;
     }
 
-    pub async fn run_status(manager_arc: Arc<TMutex<Option<ImapManager>>>, c: CredentialID) {
+    pub async fn run_status(manager_arc: Arc<TMutex<Option<ImapManager>>>, c: CredentialID, res_id: ResolveID) {
         let manager = Self::get_manager_mutex(&manager_arc, c).await;
         let status = manager.as_ref().unwrap().status();
-        for (id, status) in status {
+        for (id, status) in &status {
             println!("{:?} -> {:?}", id.s_id, status);
         }
+        ResolveStore::resolve(res_id, Resolution::Status(status));
     }
 
-    pub async fn run_suggest(manager_arc: Arc<TMutex<Option<ImapManager>>>, c: CredentialID, mb: MailboxName) {
+    pub async fn run_suggest(manager_arc: Arc<TMutex<Option<ImapManager>>>, c: CredentialID, mb: MailboxName, res_id: ResolveID) {
         Self::get_manager_mutex(&manager_arc, c).await
-            .as_mut().unwrap().handle_suggest(mb).await;
+            .as_mut().unwrap().handle_suggest(mb, res_id).await;
     }
 }

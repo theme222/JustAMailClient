@@ -27,7 +27,7 @@ impl PollTask {
             );
             if change.is_none() {
                 self.last_poll_time = Instant::now();
-                Senders::net(NetMessage { cred_id: u64::MAX, action: super::NetAction::POLL }).await;
+                Senders::net(NetMessage { action: super::NetAction::POLL, resolve: NULL_RESOLVE_ID }).await;
             }
             else if let Some(new) = change {
                 let old_duration = self.duration_based_on_state();

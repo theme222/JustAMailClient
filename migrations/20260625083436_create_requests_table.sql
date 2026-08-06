@@ -1,9 +1,11 @@
 -- Add migration script here
 CREATE TABLE IF NOT EXISTS requests (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    create_time INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec') * 1000 AS INTEGER)),
+    update_time INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec') * 1000 AS INTEGER)),
     action TEXT NOT NULL, -- TBD
     args BLOB, -- [JSONB]
-    request_time INTEGER NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    request_time INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec') * 1000 AS INTEGER)),
     finished_time INTEGER
 ) STRICT;
 

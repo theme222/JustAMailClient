@@ -37,6 +37,13 @@ impl std::fmt::Debug for Credentials {
     }
 }
 
+impl From<Credentials> for crate::srv::db::AccountKey {
+    fn from(creds: Credentials) -> Self {
+        let (local_part, domain) = creds.login.split_once('@').unwrap_or((&creds.login, ""));
+        crate::srv::db::AccountKey::LOCALPARTDOMAIN(local_part.into(), domain.into())
+    }
+}
+
 // General status
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Status {
@@ -47,42 +54,7 @@ pub enum Status {
 }
 
 pub type MailboxName = String;
-
-// TODO: Make models.rs a directory and do stuff :D
-#[derive(Debug, Clone, Default)]
-pub struct Message {
-    pub id: i64,
-    pub account_id: i64, 
-    pub last_sync_time: i64,
-    pub last_query_time: Option<i64>,
-    pub flags: Vec<MailFlag>, 
-    pub size: i64,
-    pub internal_date: i64, 
-    pub bodystructure: MailBodyStructure, // Jsonb 
-    pub imap_uid: Option<i64>, 
-    pub modseq: Option<i64>,
-    pub rfc_message_id: Option<String>, 
-    pub env_date: Option<String>, 
-    pub env_subject: Option<String>, 
-    pub env_from: Option<Vec<String>>, 
-    pub env_reply_to: Option<Vec<String>>, 
-    pub env_to: Option<Vec<String>>,
-    pub env_cc: Option<Vec<String>>,
-    pub env_bcc: Option<Vec<String>>,
-    pub env_in_reply_to: Option<String>, 
-    pub header_raw: Option<Vec<u8>>, 
-    pub body_preview: String, 
-    pub body_raw: Option<Vec<u8>>,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct Account {
-    pub id: i64,
-    pub local_part: String,
-    pub domain: String,
-    pub fetch_server: String,
-    pub push_server: String,
-}
+pub type JSONString = String;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum MailboxAttr {
@@ -102,19 +74,21 @@ pub enum MailboxAttr {
 
 impl<'a> From<&'a async_imap::types::NameAttribute<'a>> for MailboxAttr {
     fn from(attr: &'a async_imap::types::NameAttribute) -> Self {
+        use async_imap::types::NameAttribute::*;
+        use MailboxAttr::*;
         match attr {
-            async_imap::types::NameAttribute::NoInferiors => MailboxAttr::NOINFERIORS,
-            async_imap::types::NameAttribute::NoSelect => MailboxAttr::NOSELECT,
-            async_imap::types::NameAttribute::Marked => MailboxAttr::MARKED,
-            async_imap::types::NameAttribute::Unmarked => MailboxAttr::UNMARKED,
-            async_imap::types::NameAttribute::All => MailboxAttr::ALL,
-            async_imap::types::NameAttribute::Archive => MailboxAttr::ARCHIVE,
-            async_imap::types::NameAttribute::Drafts => MailboxAttr::DRAFTS,
-            async_imap::types::NameAttribute::Flagged => MailboxAttr::FLAGGED,
-            async_imap::types::NameAttribute::Junk => MailboxAttr::JUNK,
-            async_imap::types::NameAttribute::Sent => MailboxAttr::SENT,
-            async_imap::types::NameAttribute::Trash => MailboxAttr::TRASH,
-            async_imap::types::NameAttribute::Extension(cow) => MailboxAttr::CUSTOM(cow.to_string()),
+            NoInferiors => NOINFERIORS,
+            NoSelect => NOSELECT,
+            Marked => MARKED,
+            Unmarked => UNMARKED,
+            All => ALL,
+            Archive => ARCHIVE,
+            Drafts => DRAFTS,
+            Flagged => FLAGGED,
+            Junk => JUNK,
+            Sent => SENT,
+            Trash => TRASH,
+            Extension(cow) => CUSTOM(cow.to_string()),
             _ => todo!("New attribute has not been implemented {:?}", attr),
         }
     }
@@ -133,7 +107,7 @@ pub enum MailFlag {
 }
 
 impl MailFlag {
-    pub fn flag_string(flags: &Vec<MailFlag>) -> String {
+    pub fn flag_string(flags: &Vec<Self>) -> String {
         let mut result_str = String::new();
 
         for flag in flags {
@@ -141,15 +115,16 @@ impl MailFlag {
                 result_str.push_str(" ");
             }
 
+            use MailFlag::*;
             match flag {
-                MailFlag::SEEN => result_str.push_str("\\SEEN"),
-                MailFlag::ANSWERED => result_str.push_str("\\ANSWERED"),
-                MailFlag::FLAGGED => result_str.push_str("\\FLAGGED"),
-                MailFlag::DELETED => result_str.push_str("\\DELETED"),
-                MailFlag::DRAFT => result_str.push_str("\\DRAFT"),
-                MailFlag::RECENT => result_str.push_str("\\RECENT"),
-                MailFlag::MAYCREATE => result_str.push_str("\\MAYCREATE"),
-                MailFlag::CUSTOM(custom) => result_str.push_str(custom),
+                SEEN => result_str.push_str("\\SEEN"),
+                ANSWERED => result_str.push_str("\\ANSWERED"),
+                FLAGGED => result_str.push_str("\\FLAGGED"),
+                DELETED => result_str.push_str("\\DELETED"),
+                DRAFT => result_str.push_str("\\DRAFT"),
+                RECENT => result_str.push_str("\\RECENT"),
+                MAYCREATE => result_str.push_str("\\MAYCREATE"),
+                CUSTOM(custom) => result_str.push_str(custom),
             }
         }
 
@@ -271,38 +246,5 @@ impl Default for MailBodyStructure {
         }
     }
 }
-
-// TODO: I am really sad to say this but you must make sure every field that isn't an important identifier be Optional so that we can do COALESCE to update the fields that we know the new values of
-#[derive(Clone)]
-pub struct Mailbox {
-    pub name: String,
-    pub attrs: Vec<MailboxAttr>,
-    pub exists: u32,
-    pub recent: u32,
-    pub unseen: Option<u32>,
-    pub uid_next: Option<u32>,
-    pub uid_validity: Option<u32>,
-    pub highest_modseq: Option<u64>,
-}
-
-impl std::fmt::Debug for Mailbox {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Mailbox")
-            .field("name", &self.name)
-            .field("exists", &self.exists)
-            .field("recent", &self.recent)
-            .field("uid_next", &self.uid_next)
-            .field("uid_validity", &self.uid_validity)
-            .finish()
-    }
-}
-
-impl PartialEq for Mailbox {
-    fn eq(&self, other: &Self) -> bool {
-        self.name == other.name
-    }
-}
-
-impl Eq for Mailbox {}
 
 pub type ActionId = u64;

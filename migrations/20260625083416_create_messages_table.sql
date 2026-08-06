@@ -2,9 +2,9 @@
 CREATE TABLE IF NOT EXISTS messages (
     /* Internal Fields */
     id INTEGER PRIMARY KEY AUTOINCREMENT, -- Unique message id number 5,937,510
+    create_time INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec') * 1000 AS INTEGER)),
+    update_time INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec') * 1000 AS INTEGER)),
     account_id INTEGER NOT NULL, -- id of the account this message was sent from / recieved from
-    last_sync_time INTEGER NOT NULL,
-    last_query_time INTEGER,
     /* Internal Fields */
     /* Other Fields */
     flags BLOB NOT NULL, -- JSONB
@@ -71,10 +71,13 @@ CREATE TRIGGER trg_messages_au AFTER UPDATE ON messages BEGIN
     VALUES (new.id, new.env_subject, new.body_preview);
 END;
 
-CREATE TABLE message_parts ( -- Only contains data on leaf node sections of the bodystructure
+CREATE TABLE IF NOT EXISTS message_parts ( -- Only contains data on leaf node sections of the bodystructure
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    create_time INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec') * 1000 AS INTEGER)),
+    update_time INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec') * 1000 AS INTEGER)),
     message_id INTEGER NOT NULL, 
     part_spec TEXT NOT NULL, -- RFC 822 part ID
     data BLOB,
-    PRIMARY KEY (message_id, part_spec),
+    UNIQUE (message_id, part_spec),
     FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
 ) STRICT;
