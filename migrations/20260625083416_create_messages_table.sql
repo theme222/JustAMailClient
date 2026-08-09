@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS messages (
     header_raw BLOB, 
     /* Header Fields */
     /* Body Fields */
-    body_preview TEXT NOT NULL, -- CONST First 8192 bytes of the body fully parsed and extracted only useful content (used for previews and searching)
+    body_preview TEXT, -- CONST First 8192 bytes of the body fully parsed and extracted only useful content (used for previews and searching)
     /* Body Fields */
     FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE CASCADE
     UNIQUE (account_id, imap_uid)

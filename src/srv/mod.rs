@@ -87,37 +87,49 @@ impl SrvActor {
         println!("Ending srv actor");
     }
 
-    pub async fn run_sync_account(acc: AccountSQL, db_pool: sqlx::SqlitePool) -> Result<Resolution> {
+    pub async fn run_sync_account(mut acc: AccountSQL, db_pool: sqlx::SqlitePool) -> Result<Resolution> {
+        if acc.get_key().is_none() { return Err(anyhow::anyhow!("AccountSQL must have a key to be synced")); }
+        println!("Syncing account {:?}", acc.id.as_ref().unwrap().0);
+        
         let mut db_tx = db_pool.begin().await?;
+        acc.resolve_foreign(&mut db_tx).await;
         acc.upsert(&mut db_tx).await?;
         let acc_after = acc.find(&mut db_tx).await?;
         db_tx.commit().await?;
         Ok(Resolution::AccountSQL(acc_after.ok_or(anyhow::anyhow!("Failed to find account after upsert"))?))
     }
 
-    pub async fn run_sync_mailbox(mb: MailboxSQL, db_pool: sqlx::SqlitePool) -> Result<Resolution> { // Sync flags and uid_validity
+    pub async fn run_sync_mailbox(mut mb: MailboxSQL, db_pool: sqlx::SqlitePool) -> Result<Resolution> { // Sync flags and uid_validity
+        if mb.get_key().is_none() { return Err(anyhow::anyhow!("MailboxSQL must have a key to be synced")); }
+        println!("Syncing mailbox {:?}", mb.id.as_ref().unwrap().0);
+        
         let mut db_tx = db_pool.begin().await?;
+        mb.resolve_foreign(&mut db_tx).await;
         mb.upsert(&mut db_tx).await?;
         let mb_after: Option<MailboxSQL> = mb.find(&mut db_tx).await?;
         db_tx.commit().await?;
         Ok(Resolution::MailboxSQL(mb_after.ok_or(anyhow::anyhow!("Failed to find mailbox after upsert"))?))
     }
     
-    pub async fn run_sync_email(mail: MessageSQL, db_pool: sqlx::SqlitePool) -> Result<Resolution> {
-        println!("Saving email {:?}", mail.id);
+    pub async fn run_sync_email(mut mail: MessageSQL, db_pool: sqlx::SqlitePool) -> Result<Resolution> {
+        if mail.get_key().is_none() { return Err(anyhow::anyhow!("MessageSQL must have a key to be synced")); }
+        println!("Saving email {:?}", mail.id.as_ref().unwrap().0);
 
         let mut db_tx = db_pool.begin().await?;
+        mail.resolve_foreign(&mut db_tx).await;
         mail.upsert(&mut db_tx).await?;
         let msg_after: Option<MessageSQL> = mail.find(&mut db_tx).await?;
         db_tx.commit().await?;
         Ok(Resolution::MessageSQL( msg_after.ok_or(anyhow::anyhow!("Failed to find message after upsert"))? ))
     }
     
-    pub async fn run_sync_email_section(part: MessagePartSQL, db_pool: sqlx::SqlitePool) -> Result<Resolution> {
-        println!("Saving email section {:?}", part.id);
+    pub async fn run_sync_email_section(mut part: MessagePartSQL, db_pool: sqlx::SqlitePool) -> Result<Resolution> {
+        if part.get_key().is_none() { return Err(anyhow::anyhow!("MessagePartSQL must have a key to be synced")); }
+        println!("Saving email section {:?}", part.id.as_ref().unwrap().0);
         use imap_proto::types::{SectionPath::*, MessageSection};
         
         let mut db_tx = db_pool.begin().await?;
+        part.resolve_foreign(&mut db_tx).await;
         part.upsert(&mut db_tx).await?;
         let part_after = part.find(&mut db_tx).await?;
         db_tx.commit().await?;

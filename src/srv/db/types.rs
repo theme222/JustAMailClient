@@ -22,8 +22,9 @@ pub trait SQLObj: Sized + for<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> + S
     async fn find(&self, db_tx: &mut DBTx<'_>) -> Result<Option<Self>, sqlx::Error> {
         let key = self.get_key();
         if key.is_none() { return Ok(None); }
-        let key = key.clone().unwrap().0;
         let mut qb: sqlx::QueryBuilder<Sqlite> = sqlx::QueryBuilder::new(format!("SELECT * FROM {} WHERE ", Self::DB_TABLE));
+        
+        let key = key.clone().unwrap().0.resolve(db_tx).await.unwrap(); // Resolve the key into a standard form
         key.condition(&mut qb);
         
         qb.build_query_as::<Self>()
@@ -32,7 +33,10 @@ pub trait SQLObj: Sized + for<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> + S
     }
     async fn from_key(key: &KeyWrapper<Self::Key>, db_tx: &mut DBTx<'_>) -> Result<Option<Self>, sqlx::Error> {
         let mut qb: sqlx::QueryBuilder<Sqlite> = sqlx::QueryBuilder::new(format!("SELECT * FROM {} WHERE ", Self::DB_TABLE));
-        key.0.condition(&mut qb);
+        
+        let key = key.0.resolve(db_tx).await.unwrap(); // Resolve the key into a standard form
+        key.condition(&mut qb);
+        
         qb.build_query_as::<Self>()
             .fetch_optional(&mut **db_tx)
             .await
@@ -116,9 +120,8 @@ impl SQLKey for MessageKey {
         match self {
             MessageKey::ID(id) => Some(self.clone()),
             MessageKey::ACCIDIMAPUID(acc_id, imap_uid) => {
-                let acc_id = acc_id.resolve_inner(db_tx).await?;
-                let acc_id = acc_id.resolve(db_tx).await;
-                acc_id.map(|acc_id| MessageKey::ACCIDIMAPUID(acc_id, *imap_uid))
+                let acc_id = acc_id.resolve(db_tx).await?;
+                Some(MessageKey::ACCIDIMAPUID(acc_id, *imap_uid))
             }
         }
     }
@@ -130,20 +133,20 @@ pub struct MessageSQL {
     pub create_time: Option<i64>,
     pub update_time: Option<i64>,
     pub account_id: Option<KeyWrapper<AccountKey>>, 
-    pub flags: Option<JSONString>, 
+    pub flags: Option<JSONB>, 
     pub size: Option<i64>,
     pub internal_date: Option<i64>, 
-    pub bodystructure: Option<JSONString>, // Jsonb 
+    pub bodystructure: Option<JSONB>, // Jsonb 
     pub imap_uid: Option<i64>, 
     pub modseq: Option<i64>,
     pub rfc_message_id: Option<String>, 
     pub env_date: Option<String>, 
     pub env_subject: Option<String>, 
-    pub env_from: Option<JSONString>, 
-    pub env_reply_to: Option<JSONString>, 
-    pub env_to: Option<JSONString>,
-    pub env_cc: Option<JSONString>,
-    pub env_bcc: Option<JSONString>,
+    pub env_from: Option<JSONB>, 
+    pub env_reply_to: Option<JSONB>, 
+    pub env_to: Option<JSONB>,
+    pub env_cc: Option<JSONB>,
+    pub env_bcc: Option<JSONB>,
     pub env_in_reply_to: Option<String>, 
     pub header_raw: Option<Vec<u8>>, 
     pub body_preview: Option<String>, 
@@ -154,6 +157,12 @@ impl SQLObj for MessageSQL {
     
     fn get_key(&self) -> &Option<KeyWrapper<MessageKey>> { &self.id }
     fn get_key_mut(&mut self) -> &mut Option<KeyWrapper<MessageKey>> { &mut self.id }
+    async fn resolve_foreign(&mut self, db_tx: &mut DBTx<'_>) {
+        if self.account_id.is_none() { return; }
+        let key = self.account_id.as_ref().unwrap().0.clone();
+        let resolved = key.resolve(db_tx).await.expect("Failed to resolve AccountKey");
+        self.account_id = Some(KeyWrapper(resolved));
+    }
     async fn upsert(&self, db_tx: &mut DBTx<'_>) -> Result<SqliteQueryResult, sqlx::Error> {
         // We do not update the id field, create_time field. Since those must stay constant after creation.
         // Everything else is merely a suggestion to be constant 
@@ -201,8 +210,8 @@ impl SQLObj for MessageSQL {
                 env_bcc,
                 env_in_reply_to,
                 header_raw, 
-                body_preview,
-            ) VALUES ( ?, ?, ?, ?, jsonb(?), ?, jsonb(?), ?, ?, ?, ?, ?, jsonb(?), jsonb(?), jsonb(?), jsonb(?), jsonb(?), ?, ?, ? )
+                body_preview
+            ) VALUES ( ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (id) DO UPDATE SET
             "#,
             C,
@@ -237,12 +246,6 @@ impl SQLObj for MessageSQL {
             .bind(&self.body_preview)
             .execute(&mut **db_tx)
             .await
-    }
-    async fn resolve_foreign(&mut self, db_tx: &mut DBTx<'_>) {
-        if self.account_id.is_none() { return; }
-        let key = self.account_id.as_ref().unwrap().0.clone();
-        let resolved = key.resolve(db_tx).await.expect("Failed to resolve AccountKey");
-        self.account_id = Some(KeyWrapper(resolved));
     }
 }
 
@@ -374,7 +377,7 @@ impl SQLKey for MailboxKey {
         match self {
             MailboxKey::ID(_) => Some(self.clone()),
             MailboxKey::ACCIDNAME(account_key, mb_name) => {
-                let account_key = account_key.resolve_inner(db_tx).await?;
+                let account_key = account_key.resolve(db_tx).await?;
                 Some(MailboxKey::ACCIDNAME(account_key, mb_name.clone()))
             },
         }
@@ -392,7 +395,7 @@ pub struct MailboxSQL {
     pub mail_count: Option<i64>,
     pub recent: Option<i64>,
     pub unseen: Option<i64>,
-    pub attrs: Option<JSONString>,
+    pub attrs: Option<JSONB>,
     pub highest_modseq: Option<i64>,
     pub uid_next: Option<i64>,
     pub uid_validity: Option<i64>,
@@ -406,8 +409,8 @@ impl SQLObj for MailboxSQL {
     async fn resolve_foreign(&mut self, db_tx: &mut DBTx<'_>) {
         if self.account_id.is_none() { return; }
         let account_id = self.account_id.as_ref().unwrap().0.clone();
-        account_id.resolve(db_tx).await.expect("Failed to resolve AccountKey");
-        self.account_id = Some(KeyWrapper(account_id));
+        let resolved = account_id.resolve(db_tx).await.expect("Failed to resolve AccountKey");
+        self.account_id = Some(KeyWrapper(resolved));
     }
     async fn upsert(&self, db_tx: &mut DBTx<'_>) -> Result<SqliteQueryResult, sqlx::Error> {
         const C: &str = r#"
@@ -435,9 +438,9 @@ impl SQLObj for MailboxSQL {
                 attrs,
                 highest_modseq,
                 uid_next,
-                uid_validity,
+                uid_validity
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, jsonb(?), ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (id) DO UPDATE SET
             "#,
             C,
@@ -498,7 +501,7 @@ impl SQLKey for MessagePartKey {
         match self {
             MessagePartKey::ID(id) => Some(self.clone()),
             MessagePartKey::MSGIDPARTSPEC(msg_key, part_spec) => {
-                let msg_key = msg_key.resolve_inner(db_tx).await?;
+                let msg_key = msg_key.resolve(db_tx).await?;
                 Some(MessagePartKey::MSGIDPARTSPEC(msg_key, part_spec.clone()))
             },
         }
@@ -529,7 +532,7 @@ impl SQLObj for MessagePartSQL {
     async fn upsert(&self, db_tx: &mut DBTx<'_>) -> Result<SqliteQueryResult, sqlx::Error> {
         const C: &str = r#"
             update_time = EXCLUDED.update_time,
-            message_id = COALESCE(EXCLUDED.message_id, message_id)
+            message_id = COALESCE(EXCLUDED.message_id, message_id),
             part_spec = COALESCE(EXCLUDED.part_spec, part_spec),
             data = COALESCE(EXCLUDED.data, data)
         "#;
@@ -547,14 +550,15 @@ impl SQLObj for MessagePartSQL {
             "#,
             C,
             r#"
-                ON CONFLICT (message_id, part_spec) DO UPDATE SET
+            ON CONFLICT (message_id, part_spec) DO UPDATE SET
             "#,
             C
         );
+        let t = unix_timestamp();
         sqlx::query(Q)
             .bind(&self.id)
-            .bind(&self.create_time)
-            .bind(&self.update_time)
+            .bind(&t)
+            .bind(&t)
             .bind(&self.message_id)
             .bind(&self.part_spec)
             .bind(&self.data)

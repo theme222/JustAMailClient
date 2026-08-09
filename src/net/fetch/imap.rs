@@ -356,6 +356,7 @@ impl From<&async_imap::types::Fetch> for Message {
         let body_raw = Some(body_bytes.to_vec());
         let env = mail.envelope();
 
+        msg.internal_date = mail.internal_date().map(|d| d.timestamp_millis());
         msg.bodystructure = mail.bodystructure().map(|b| b.into());
         msg.imap_uid = mail.uid;
         msg.body_preview = msg.bodystructure.as_ref().and_then(|bs| structure::get_preview_from_partial(body_bytes));
@@ -400,21 +401,22 @@ impl From<&Message> for db::MessageSQL {
     fn from(from_msg: &Message) -> Self {
         let mut msg = db::MessageSQL::default();
 
-        msg.bodystructure = from_msg.bodystructure.as_ref().and_then(|bs| serde_json::to_string(bs).ok());
-        msg.imap_uid = from_msg.imap_uid.map(|u| u as i64);
-        msg.body_preview = from_msg.body_preview.clone();
+        msg.flags = serde_sqlite_jsonb::to_vec(&from_msg.flags).ok();
         msg.size = from_msg.size.map(|s| s as i64);
-        msg.flags = serde_json::to_string(&from_msg.flags).ok();
+        msg.internal_date = from_msg.internal_date;
+        msg.bodystructure = from_msg.bodystructure.as_ref().and_then(|bs| serde_sqlite_jsonb::to_vec(bs).ok());
         msg.modseq = from_msg.modseq.map(|s| s as i64);
+        msg.imap_uid = from_msg.imap_uid.map(|u| u as i64);
         msg.rfc_message_id = from_msg.rfc_message_id.clone();
         msg.env_date = from_msg.env_date.clone();
         msg.env_subject = from_msg.env_subject.clone();
+        msg.env_from = from_msg.env_from.as_ref().and_then(|x| serde_sqlite_jsonb::to_vec(x).ok());
+        msg.env_reply_to = from_msg.env_reply_to.as_ref().and_then(|x| serde_sqlite_jsonb::to_vec(x).ok());
+        msg.env_to = from_msg.env_to.as_ref().and_then(|x| serde_sqlite_jsonb::to_vec(x).ok());
+        msg.env_cc = from_msg.env_cc.as_ref().and_then(|x| serde_sqlite_jsonb::to_vec(x).ok());
+        msg.env_bcc = from_msg.env_bcc.as_ref().and_then(|x| serde_sqlite_jsonb::to_vec(x).ok());
         msg.env_in_reply_to = from_msg.env_in_reply_to.clone();
-        msg.env_from = from_msg.env_from.as_ref().and_then(|x| serde_json::to_string(x).ok());
-        msg.env_reply_to = from_msg.env_reply_to.as_ref().and_then(|x| serde_json::to_string(x).ok());
-        msg.env_to = from_msg.env_to.as_ref().and_then(|x| serde_json::to_string(x).ok());
-        msg.env_cc = from_msg.env_cc.as_ref().and_then(|x| serde_json::to_string(x).ok());
-        msg.env_bcc = from_msg.env_bcc.as_ref().and_then(|x| serde_json::to_string(x).ok());
+        msg.body_preview = from_msg.body_preview.clone();
 
         msg
     }
@@ -426,6 +428,7 @@ pub enum ImapSessionCommandType {
     LISTFETCH(MailboxName, SeqRange), // -> MessageSQL
     SECTIONFETCH(MailboxName, SeqRange, Vec<MailBodyStructure>), // -> MessageSQL 
     FULLFETCH(MailboxName, SeqRange, Option<u64> /* msg size */), // -> MessageSQL
+    NOOPON(MailboxName), // -> Nothing
     IDLE(MailboxName), // -> Doesn't resolve with success 
     /* Internal use */
     NOOP, // -> Nothing
@@ -469,6 +472,7 @@ impl ImapSessionCommand {
             } // Educated guess.
             IDLE(_) => NETSOCK_REFRESH_INTERVAL.as_secs_f64() / ASSUMED_LATENCY as f64 * 1000.0,
             NOOP => 1.0,
+            NOOPON(_) => 1.0,
             SHUTDOWN => 1.0,
             SELECT(_) => 1.0,
             SECTIONFETCH(_, range, vec_bs) => {
@@ -496,6 +500,7 @@ impl ImapSessionCommand {
             LISTFETCH(mb, _) => Some(mb),
             IDLE(mb) => Some(mb),
             NOOP => None,
+            NOOPON(mb) => Some(mb),
             SHUTDOWN => None,
             SELECT(mb) => Some(mb),
             SECTIONFETCH(mb, _, _) => Some(mb),
@@ -588,7 +593,7 @@ impl ImapSession {
         assert!(cred.auth_method == AuthMethod::LOGIN);
         assert!(cred.encryption_method == EncryptionMethod::SSLTLS);
 
-        let imap_addr = (cred.fetch_server.clone(), 993);
+        let imap_addr = (cred.fetch_server.clone(), cred.fetch_port);
         let tcp_stream = TcpStream::connect(&imap_addr).await?;
         let tls = async_native_tls::TlsConnector::new();
         let tls_stream = tls
@@ -652,6 +657,7 @@ impl ImapSession {
                 NOOP => self.noop(res_id).await,
                 IDLE(mb) => self.idle(mb.into(), res_id).await,
                 SELECT(mb) => self.select(res_id, &mb, true).await,
+                NOOPON(mb) => self.noopon(res_id, &mb).await,
                 ImapSessionCommandType::SHUTDOWN => {
                     ResolveStore::resolve(res_id, Resolution::Nothing);
                     break;
@@ -718,14 +724,13 @@ impl ImapSession {
                     )
                     .await
                 }
+                LISTFETCH(_, seq_range) => todo!(),
             };
+            
 
             if let Ok(success) = res {
-                if command.id == u64::MAX {
-                    continue;
-                }
-
-                if success == ImapSessionSuccess::ONCE {
+                if command.id == u64::MAX { }
+                else if success == ImapSessionSuccess::ONCE {
                     Senders::net(NetMessage {
                         action: IMAPUPDATE {
                             update: CMDSUCCESS(self.id.clone(), command.id),
@@ -745,13 +750,8 @@ impl ImapSession {
                     })
                     .await;
                 }
-                continue;
             }
-
-            if let Err(err) = res {
-                if let ABORTED = err {
-                    self.net = None;
-                } // Force drop
+            else if let Err(err) = res {
                 let net_exists = self.net.is_some();
                 eprintln!("Err while executing command {:?}: {:?}", command.ty, err);
                 use AsyncImapError::*;
@@ -785,7 +785,10 @@ impl ImapSession {
                     INVALIDRESPONSE(_) => {
                         CMDFAILUREUNRECOVERABLE(self.id.clone(), command.id, net_exists)
                     }
-                    ABORTED => CMDFAILURETRYAGAIN(self.id.clone(), command.id, net_exists),
+                    ABORTED => {
+                        self.net = None;
+                        CMDFAILURETRYAGAIN(self.id.clone(), command.id, net_exists)
+                    }
                     TLSERROR(error) => unreachable!(), // Probably idk
                     AUTHENTICATIONERROR => unreachable!(), // I better hope so
                 };
@@ -807,19 +810,21 @@ impl ImapSession {
                         },
                         resolve: NULL_RESOLVE_ID, // We will resolve this right now
                     }).await;
+                    ResolveStore::fail(res_id, err.into());
                 }
 
-                ResolveStore::fail(res_id, err.into());
 
                 // Check to see if we still own the network
                 if self.net.is_none() {
-                    return;
+                    break;
                 }
             }
 
-            if let Ok(us) = self.net.as_mut().unwrap().unsolicited_responses.try_recv() {
+            while !self.net.as_mut().unwrap().unsolicited_responses.is_empty() {
+                let Ok(us) = self.net.as_mut().unwrap().unsolicited_responses.recv().await else { break; };
                 println!("Received unsolicted response {:?}", us);
             }
+
         }
 
         self.net.take(); // force drop the network either way
@@ -878,8 +883,15 @@ impl ImapSession {
     pub async fn noop(&mut self, res_id: ResolveID) -> ImapSessionResult<ImapSessionSuccess> {
         let (network, abort) = self.net_abort();
         let res = Self::call_with_abort(abort, network.noop()).await;
+        // let a = network.unsolicited_responses.try_recv();
+        // println!("{:?}", a);
         ResolveStore::resolve(res_id, Resolution::Nothing);
         Ok(ImapSessionSuccess::ONCE)
+    }
+
+    pub async fn noopon(&mut self, res_id: ResolveID, mb_name: &str) -> ImapSessionResult<ImapSessionSuccess> {
+        self.select(res_id, mb_name, false).await?;
+        self.noop(res_id).await
     }
 
     // SELECT: Select a mailbox on the server.
@@ -892,14 +904,21 @@ impl ImapSession {
         }
         let (network, abort) = self.net_abort();
         let mailbox = Self::call_with_abort(abort, network.select_condstore(mb_name)).await?;
-        let mailbox: Mailbox = (&mailbox).into();
-        let mailbox_sql: db::MailboxSQL = (&mailbox).into();  
+        let mut mailbox: Mailbox = (&mailbox).into();
+        mailbox.name = mb_name.into();
+        let mut mailbox_sql: db::MailboxSQL = (&mailbox).into();  
+        
+        let acc_key: db::AccountKey = CredentialStore::get(self.id.m_id).into();
+        mailbox_sql.id = Some(db::KeyWrapper(
+            db::MailboxKey::ACCIDNAME( acc_key.clone(), mailbox_sql.name.clone().unwrap() )
+        ));
+        mailbox_sql.account_id = Some(db::KeyWrapper(acc_key));
 
         self.current_mailbox = Some(mailbox);
         self.current_mailbox
             .as_mut()
             .map(|mut mb| mb.name = mb_name.into());
-        println!("Selected mailbox: {:?}", self.current_mailbox);
+        // println!("Selected mailbox: {:?}", self.current_mailbox);
         Senders::srv(SrvMessage {
             action: srv::SrvAction::SYNCMAILBOX {
                 mb: mailbox_sql.clone(),
@@ -933,7 +952,6 @@ impl ImapSession {
         let mut msgs: Vec<db::MessageSQL> = Vec::new();
         let mut msg_parts_sqls: Vec<db::MessagePartSQL> = Vec::new();
 
-        
         while let Some(mail_result) = {
             let res = tokio::select! {
                 _ = abort.recv() => { Err(ImapSessionError::ABORTED) }
@@ -973,8 +991,10 @@ impl ImapSession {
             let message = Message::from(&mail);
             
             let mut msg_sql = db::MessageSQL::from(&message);
-            let message_key = KeyWrapper( MessageKey::ACCIDIMAPUID( CredentialStore::get(creds).into(), msg_sql.imap_uid.unwrap() ) );
+            let acc_key: db::AccountKey = CredentialStore::get(creds).into();
+            let message_key = KeyWrapper( MessageKey::ACCIDIMAPUID( acc_key.clone(), msg_sql.imap_uid.unwrap() ) );
             msg_sql.id = Some(message_key.clone()); // Explicitly set the id because MessageSQL::from() simply doesn't have enough information to infer this
+            msg_sql.account_id = Some(db::KeyWrapper( acc_key ));
             
             let mut msg_parts_sql: Vec<db::MessagePartSQL> = Vec::new();
             
@@ -1285,8 +1305,8 @@ impl ImapSessionState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Copy)]
 #[repr(u64)]
+#[derive(Debug, Clone, PartialEq, Eq, Copy, num_derive::FromPrimitive)]
 pub enum Capability {
     IMAP4rev1 = 1 << 0,
     IMAP4rev2 = 1 << 1,
@@ -1398,8 +1418,11 @@ impl Capability {
             cap => CapabilitiesList::new()
         }
     }
+    pub const fn from_bits(bits: u64) -> Option<Self> {
+        
+        None
+    }
 }
-
 
 pub struct CapabilitiesList {
     contains: u64,
@@ -1430,14 +1453,31 @@ impl CapabilitiesList {
     }
 
     pub const fn capable_to(&self, caps: CapabilitiesList) -> bool {
-        self.implies & caps.implies != 0
+        self.implies & caps.implies == caps.implies
     }
     
     pub const fn set(&mut self, cap: Capability) {
         self.contains |= cap as u64;
         self.implies |= cap.implied().implies | cap as u64;
     }
+    
+    pub fn to_vec(&self) -> Vec<Capability> {
+        let mut vec = Vec::new();
+        for i in 0..64 {
+            if self.contains & (1 << i) != 0 {
+                use num_traits::FromPrimitive;
+                vec.push(Capability::from_u64(1 << i).unwrap());
+            }
+        }
+        vec
+    }
+}
 
+impl std::fmt::Debug for CapabilitiesList {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let vec = self.to_vec();
+        vec.fmt(f)
+    }
 }
 
 impl From<async_imap::types::Capabilities> for CapabilitiesList {
@@ -1490,63 +1530,69 @@ impl From<async_imap::types::Capabilities> for CapabilitiesList {
 
 const MINIMUM_CAPS_ALLOWED: CapabilitiesList = caps!( Capability::IMAP4rev1 );
 const MINIMUM_CAPS_IDLE: CapabilitiesList = caps!( Capability::IMAP4rev1, Capability::IDLE );
+static IDLE_IS_BROKEN: [Service; 2] = [Service::YAHOO, Service::AOL]; // Yahoo why you do this :(
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PollingStrategy {
     IDLE,
     NOOPSPAM, // I am naming it this because disrepsectfully stfu
 }
 
+type PollStrategyMap = std::collections::HashMap<MailboxName, PollingStrategy>;
 pub struct ImapManager {
     // One manager per account
     pub id: CredentialID,
     pub imap_session_states: std::collections::HashMap<ImapSessionId, ImapSessionState>, // Key is id
     pub capabilities: CapabilitiesList,
-    pub poll_strategy: std::collections::HashMap<MailboxName, PollingStrategy>,
+    pub poll_strategy: PollStrategyMap,
 }
 
 impl ImapManager {
 
-    fn evaluate_self(&mut self) -> Result<()> { // If this fails we can't continue
+    // Evaluates the current state of the 
+    fn evaluate_poll_strategy(&mut self) -> Result<()> { // If this fails we can't continue
         let active_sessions = self.get_active_session_count();
+        let mailbox_names = self.poll_strategy.keys().cloned().collect::<Vec<_>>();
+        let creds = CredentialStore::get(self.id);
+        self.poll_strategy.values_mut().for_each(|s| { *s = PollingStrategy::NOOPSPAM; });
         if !self.capabilities.capable_to(MINIMUM_CAPS_ALLOWED) {
             return Err(ImapSessionError::INVALIDRESPONSE("Server does not support minimum required capabilities".to_string()).into());
         } else if active_sessions == 0 {
             return Err(anyhow::anyhow!("Failed to create any IMAP sessions"));
-        } else if active_sessions == 1 || !self.capabilities.able_to(Capability::IDLE) {
-            return Err(anyhow::anyhow!("NOOPSPAM unimplemented"));
-            // self.poll_strategy = PollingStrategy::NOOPSPAM;
+        } else if active_sessions >= 2 && self.capabilities.capable_to(MINIMUM_CAPS_IDLE) && !IDLE_IS_BROKEN.contains(&creds.service) {
+            self.poll_strategy.insert("INBOX".into(), PollingStrategy::IDLE);
         }
         Ok(())
     }
-    
+
     pub async fn new(m_id: CredentialID) -> Result<Self> {
+        let (cap_list, poll_strat_map) = Self::probe_server(m_id).await?;
         let mut manager = Self {
             id: m_id,
             imap_session_states: std::collections::HashMap::new(),
-            capabilities: Self::probe_server(m_id).await?,
-            poll_strategy: std::collections::HashMap::new(),
+            capabilities: cap_list,
+            poll_strategy: poll_strat_map,
         };
 
         manager.create_session_states(m_id, MAX_IMAP_SESSIONS).await;
-        manager.evaluate_self()?;
+        manager.evaluate_poll_strategy()?;
+        println!("{:?}", manager.capabilities);
 
-        // match manager.poll_strategy {
-        //     PollingStrategy::IDLE => todo!(),
-        //     PollingStrategy::NOOPSPAM => todo!(),
-        // }
-
-        manager
-            .call_session(ImapSessionCommandType::IDLE("INBOX".into()), NULL_RESOLVE_ID)
-            .await;
+        for (mb, poll_strat) in manager.poll_strategy.clone().into_iter() {
+            if poll_strat != PollingStrategy::IDLE { continue; }
+            manager
+                .call_session(ImapSessionCommandType::IDLE(mb), NULL_RESOLVE_ID)
+                .await;
+        }
         Ok(manager)
     }
 
-    pub async fn probe_server(m_id: CredentialID) -> ImapSessionResult<CapabilitiesList> {
+    pub async fn probe_server(m_id: CredentialID) -> ImapSessionResult<(CapabilitiesList, PollStrategyMap)> {
         let (sender, receiver) = tokio::sync::mpsc::channel::<ImapSessionCommand>(100);
         let (abort_sender, abort_recv) = tokio::sync::mpsc::channel::<()>(5);
         let mut client: Option<async_imap::Session<Compat<TlsStream<TcpStream>>>> = None;
         let mut cap_option: Option<async_imap::types::Capabilities> = None;
+        let mut poll_strat_map: PollStrategyMap = std::collections::HashMap::new();
         
         loop {
             let res = ImapSession::get_client(m_id).await;
@@ -1579,6 +1625,8 @@ impl ImapManager {
             let attrs = name.attributes();
             let mb_name = name.name();
             println!("{:?} {}", attrs, mb_name);
+
+            poll_strat_map.insert(mb_name.into(), PollingStrategy::NOOPSPAM);
             let acc_id: db::AccountKey = CredentialStore::get(m_id).into();
             let mailbox_sql = db::MailboxSQL {
                 id: Some(db::KeyWrapper(db::MailboxKey::ACCIDNAME(
@@ -1593,7 +1641,7 @@ impl ImapManager {
                 recent: None,
                 unseen: None,
                 attrs: Some(
-                    serde_json::to_string(
+                    serde_sqlite_jsonb::to_vec(
                         &attrs.iter().map(MailboxAttr::from).collect::<Vec<_>>()
                     ).unwrap()
                 ),
@@ -1604,7 +1652,7 @@ impl ImapManager {
             Senders::srv(SrvMessage { action: SYNCMAILBOX { mb: mailbox_sql }, resolve: NULL_RESOLVE_ID }).await;
         }
 
-        Ok(cap_list)
+        Ok((cap_list, poll_strat_map))
     }
 
     pub fn get_active_session_count(&self) -> usize {
@@ -1622,12 +1670,6 @@ impl ImapManager {
             .into_iter()
             .map(|(id, s)| (id, s.status()))
             .collect()
-    }
-
-    pub async fn poll(&mut self) {
-        for (isid, _) in self.imap_session_states.iter() {
-            
-        }
     }
 
     pub async fn rcv_session_update(&mut self, upd: SessionUpdate, res_id: ResolveID) {
@@ -1742,6 +1784,15 @@ impl ImapManager {
                 })
                 .await;
         }
+    }
+
+    pub async fn handle_poll(&mut self) {
+        println!("Polling strategy: {:?}", self.poll_strategy);
+        for (mb, poll_strat) in self.poll_strategy.clone().into_iter() {
+            if poll_strat == PollingStrategy::IDLE {continue;}
+            self.call_session(ImapSessionCommandType::NOOPON(mb), NULL_RESOLVE_ID).await;
+        }
+        // self.call_session(ImapSessionCommandType::NOOPON("Draft".into()), NULL_RESOLVE_ID).await;
     }
 
     pub async fn shutdown(&mut self, res_id: ResolveID) {

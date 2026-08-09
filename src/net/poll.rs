@@ -13,7 +13,7 @@ impl PollTask {
     pub fn new() {
         let pt = Self {
             last_poll_time: Instant::now(),
-            current_state: AppState::get(),
+            current_state: AppStateStore::get(),
         };
         tokio::spawn(pt.run());
     }
@@ -22,7 +22,7 @@ impl PollTask {
         let mut duration_todo: Option<Duration> = None;
         loop {
             let change = tokio::select!(
-                res = AppState::await_change() => Some(res),
+                res = AppStateStore::await_change() => Some(res),
                 _ = wait_with_jitter(duration_todo.unwrap_or(self.duration_based_on_state())) => None,
             );
             if change.is_none() {
@@ -41,13 +41,13 @@ impl PollTask {
         }
     }
 
-    pub fn duration_based_on_state(&self) -> Duration {
+    pub const fn duration_based_on_state(&self) -> Duration {
         match self.current_state {
-            AppState::AFK => Duration::from_mins(2),
-            AppState::INACTIVE => Duration::from_mins(1),
-            AppState::OUTOFFOCUS => Duration::from_secs(20),
-            AppState::FOCUSED => Duration::from_secs(10),
-            AppState::ACTIVE => Duration::from_secs(5),
+            AppState::AFK => Duration::from_mins(10),
+            AppState::INACTIVE => Duration::from_mins(5),
+            AppState::OUTOFFOCUS => Duration::from_mins(1),
+            AppState::FOCUSED => Duration::from_secs(30),
+            AppState::ACTIVE => Duration::from_secs(10),
         }
     }
 }

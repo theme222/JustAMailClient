@@ -20,3 +20,51 @@ pub const NETSOCK_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::f
 pub const NETSOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(10); // Your internet better be quick
 pub const INITIAL_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(200);
 pub const MAX_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(16);
+
+pub const SERVICE_CONFIG: phf::Map<&str, super::ServiceConfig> = phf::phf_map! {
+    "AOL" => super::ServiceConfig {
+        service: super::Service::AOL,
+        fetch_server: "imap.aol.com",
+        fetch_port: 993,
+        push_server: "smtp.aol.com",
+        push_port: 587,
+        auth_method: super::AuthMethod::LOGIN,
+        encryption_method: super::EncryptionMethod::SSLTLS,
+    },
+    "YAHOO" => super::ServiceConfig {
+        service: super::Service::YAHOO,
+        fetch_server: "imap.mail.yahoo.com",
+        fetch_port: 993,
+        push_server: "smtp.mail.yahoo.com",
+        push_port: 587,
+        auth_method: super::AuthMethod::LOGIN,
+        encryption_method: super::EncryptionMethod::SSLTLS,
+    },
+    "ICLOUD" => super::ServiceConfig {
+        service: super::Service::ICLOUD,
+        fetch_server: "imap.mail.me.com",
+        fetch_port: 993,
+        push_server: "imap.mail.me.com",
+        push_port: 587,
+        auth_method: super::AuthMethod::LOGIN,
+        encryption_method: super::EncryptionMethod::SSLTLS,
+    },
+    "GMAIL" => super::ServiceConfig {
+        service: super::Service::GMAIL,
+        fetch_server: "imap.gmail.com",
+        fetch_port: 993,
+        push_server: "smtp.gmail.com",
+        push_port: 587,
+        auth_method: super::AuthMethod::LOGIN,
+        encryption_method: super::EncryptionMethod::SSLTLS,
+    },
+    "OUTLOOK" => super::ServiceConfig {
+        service: super::Service::OUTLOOK,
+        fetch_server: "imap-mail.outlook.com",
+        fetch_port: 993,
+        push_server: "smtp-mail.outlook.com",
+        push_port: 587,
+        auth_method: super::AuthMethod::LOGIN,
+        encryption_method: super::EncryptionMethod::SSLTLS,
+    },
+};

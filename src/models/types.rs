@@ -18,13 +18,39 @@ pub enum EncryptionMethod {
     STARTTLS,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Service {
+    YAHOO,
+    AOL,
+    GMAIL,
+    OUTLOOK,
+    ICLOUD,
+    FASTMAIL,
+    YANDEX,
+    CUSTOM(String)
+} 
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ServiceConfig {
+    pub service: Service,
+    pub fetch_server: &'static str,
+    pub fetch_port: u16,
+    pub push_server: &'static str,
+    pub push_port: u16,
+    pub auth_method: AuthMethod,
+    pub encryption_method: EncryptionMethod,
+}
+
 pub type CredentialID = u64;
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Credentials {
+    pub service: Service,
     pub login: String,
     pub secret: String,
     pub fetch_server: String,
+    pub fetch_port: u16,
     pub push_server: String,
+    pub push_port: u16,
     pub auth_method: AuthMethod,
     pub encryption_method: EncryptionMethod,
 }
@@ -55,6 +81,7 @@ pub enum Status {
 
 pub type MailboxName = String;
 pub type JSONString = String;
+pub type JSONB = Vec<u8>;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum MailboxAttr {

@@ -60,7 +60,13 @@ impl NetActor {
         use NetAction::*;
         println!("Starting net actor");
         while let Some(msg) = self.inbox.recv().await {
-            println!("Doing action: {:?}", msg.action);
+            if !matches!(
+                &msg.action, 
+                IMAPUPDATE{ cred_id: _, update: SessionUpdate::CMDSUCCESS(_, _) } |
+                IMAPUPDATE{ cred_id: _, update: SessionUpdate::CMDSUCCESSRETRY(_, _) }
+            ) {
+                println!("Doing action: {:?}", msg.action);
+            }
             let res_id = msg.resolve;
             
             match msg.action {
@@ -70,7 +76,7 @@ impl NetActor {
                 STATUS { cred_id } => { tokio::spawn(Self::run_status(self.get_manager_arc(cred_id).await, cred_id, res_id)); }
                 IMAPUPDATE { cred_id, update } => { tokio::spawn(Self::run_imap_update(self.get_manager_arc(cred_id).await, cred_id, update, res_id)); }
                 SUGGEST { cred_id, mb } => { tokio::spawn(Self::run_suggest(self.get_manager_arc(cred_id).await, cred_id, mb, res_id)); }
-                POLL => {/* TODO Fill this bad boy in */},
+                POLL => { self.run_poll(res_id); }
                 SHUTDOWN => { break; }
                 // _ => { println!("Unknown action: {:?}", msg.action) }
             }
@@ -87,7 +93,7 @@ impl NetActor {
 
     async fn get_manager_mutex<'a>(manager_ref: &'a Arc<TMutex<Option<ImapManager>>>, c: CredentialID) -> tokio::sync::MutexGuard<'a, Option<ImapManager>> {
         // This will yield the current thread if the manager is still being used by a previous action.
-        // Also returning the MutexGuard allows us to call methods on the manager without the lock unlocking.
+        // Also returning the MutexGuard allows us to call methods on the manager without the lock locking.
         let mut manager_mutex = manager_ref.lock().await;
         if manager_mutex.is_none() { *manager_mutex = Some(ImapManager::new(c).await.unwrap()); } 
         manager_mutex
@@ -130,5 +136,18 @@ impl NetActor {
     pub async fn run_suggest(manager_arc: Arc<TMutex<Option<ImapManager>>>, c: CredentialID, mb: MailboxName, res_id: ResolveID) {
         Self::get_manager_mutex(&manager_arc, c).await
             .as_mut().unwrap().handle_suggest(mb, res_id).await;
+    }
+
+    pub fn run_poll(&mut self, res_id: ResolveID) {
+        let managers = self.managers.clone();
+        for (cred_id, manager_arc) in managers.iter() {
+            let manager_arc = manager_arc.clone();
+            let cred_id = *cred_id;
+            tokio::spawn(async move {
+                let mut manager = Self::get_manager_mutex(&manager_arc, cred_id).await;
+                manager.as_mut().unwrap().handle_poll().await;
+            });
+        }
+        ResolveStore::resolve(res_id, Resolution::Nothing);
     }
 }

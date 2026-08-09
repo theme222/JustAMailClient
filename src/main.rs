@@ -66,22 +66,22 @@ async fn runner() -> Result<()> {
     tokio::spawn(async move { net_actor.run().await; });
     tokio::spawn(async move { srv_actor.run().await; });
     
-    let service = "AOL";
-    let imap_server_str = format!("{}_IMAP_SERVER", service);
-    let smtp_server_str = format!("{}_SMTP_SERVER", service);
+    let service = "YAHOO";
+    let srv_config = SERVICE_CONFIG.get(service).context("Unknown service")?;
     let login_str = format!("{}_EMAIL", service);
     let password_str = format!("{}_PASSWORD", service);
         
-    let imap_server = std::env::var(imap_server_str).context("IMAP_SERVER not set")?;
-    let smtp_server = std::env::var(smtp_server_str).context("SMTP_SERVER not set")?;
     let login = std::env::var(login_str).context("EMAIL not set")?;
     let password = std::env::var(password_str).context("PASSWORD not set")?;
     
     let creds = Credentials {
+        service: srv_config.service.clone(),
         login: login,
         secret: password,
-        fetch_server: imap_server,
-        push_server: smtp_server,
+        fetch_server: srv_config.fetch_server.to_string(),
+        fetch_port: srv_config.fetch_port,
+        push_server: srv_config.push_server.to_string(),
+        push_port: srv_config.push_port,
         auth_method: AuthMethod::LOGIN,
         encryption_method: EncryptionMethod::SSLTLS,
     };
@@ -99,6 +99,7 @@ async fn runner() -> Result<()> {
             "fetch" => { Senders::net(NetMessage {action: NetAction::LISTFETCH { cred_id }, resolve: NULL_RESOLVE_ID}).await; }
             "status" => { Senders::net(NetMessage {action: NetAction::STATUS { cred_id }, resolve: NULL_RESOLVE_ID}).await; }
             "list" => { Senders::srv(SrvMessage {action: SrvAction::LISTEMAILS, resolve: NULL_RESOLVE_ID}).await; }
+            "poll" => { Senders::net(NetMessage {action: NetAction::POLL, resolve: NULL_RESOLVE_ID}).await; }
             "help" => { println!("Available commands: send, fetch, status, list, help, exit"); }
             "exit" => { break; }
             _ => { println!("Unknown command: {}", input); }

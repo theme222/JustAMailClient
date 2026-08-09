@@ -4,6 +4,7 @@ use std::{panic, sync::Mutex};
 use crate::{models::Senders, srv::{self}};
 use crate::db::types::{SQLKey, SQLObj};
 use anyhow::Result;
+use futures::lock;
 
 static ID_STORE: Mutex<IDStore> = Mutex::new(IDStore { next_cmd_id: 0, next_s_id: 0 });
 
@@ -101,7 +102,7 @@ pub struct AppStateStore {
 
 impl AppStateStore {
     pub fn init() -> AppStateStore {
-        let (send, recv) = tokio::sync::watch::channel(AppState::INACTIVE);
+        let (send, recv) = tokio::sync::watch::channel(AppState::OUTOFFOCUS);
         AppStateStore {
             recv: recv,
             sender: send,
@@ -111,18 +112,7 @@ impl AppStateStore {
     pub fn change(state: AppState) {
         APP_STATE_STORE.sender.send(state);
     }
-}
-
-#[derive(Debug, Clone, Copy, Ord, PartialOrd, PartialEq, Eq)]
-pub enum AppState {
-    AFK, // Idle for > 30 minutes
-    INACTIVE, // Idle for 10 - 30 minutes
-    OUTOFFOCUS, // Idle for 5 - 10 minutes and app isn't focused
-    FOCUSED, // Idle for 5 - 10 minutes and app is focused
-    ACTIVE,  // Idle for < 5 minutes (app focused or unfocused doesn't matter)
-}
-
-impl AppState { // kinda braindead but good enough
+    
     pub fn set(state: AppState) {
         APP_STATE_STORE.sender.send(state);
     }
@@ -131,10 +121,19 @@ impl AppState { // kinda braindead but good enough
         APP_STATE_STORE.recv.borrow().clone()
     }
     
-    pub async fn await_change() -> Self {
+    pub async fn await_change() -> AppState {
         let current = Self::get();
         APP_STATE_STORE.recv.clone().wait_for(|state| state != &current).await.unwrap().clone()
     }
+}
+
+#[derive(Debug, Clone, Copy, Ord, PartialOrd, PartialEq, Eq)]
+pub enum AppState {
+    AFK, // Idle for > 30 minutes
+    INACTIVE, // Idle for 10 - 30 minutes
+    OUTOFFOCUS, // Idle for 1 - 10 minutes and app isn't focused
+    FOCUSED, // Idle for 1 - 10 minutes and app is focused
+    ACTIVE,  // Idle for < 1 minutes (app focused or unfocused doesn't matter)
 }
 
 pub type Resolve = anyhow::Result<Resolution>;
@@ -169,7 +168,7 @@ impl ResolveStore {
         }
     }
 
-    pub fn make() -> ResolveID {
+    pub fn make() -> ResolveID { // Mutex lock 
         let mut store = RESOLVE_STORE.lock().unwrap();
         let id = store.resolve_count;
         let (rx, tx) = tokio::sync::oneshot::channel::<Resolve>();
@@ -178,36 +177,45 @@ impl ResolveStore {
         id
     }
 
-    pub fn delete_if_resolved(id: ResolveID) {
+    pub fn delete_if_resolved(id: ResolveID) { // Mutex lock
         let mut store = RESOLVE_STORE.lock().unwrap();
         if let Some((None, None)) = store.hashmap.get(&id) { store.hashmap.remove(&id); }
     }
 
     pub fn resolve(id: ResolveID, resolution: Resolution) {
         if id == NULL_RESOLVE_ID { return }
-        if let Some((_, tx)) = RESOLVE_STORE.lock().unwrap().hashmap.get_mut(&id) {
-            tx.take().expect(format!("ResolveID: {} has already been resolved", id).as_str()).send(Resolve::Ok(resolution));
+        { // Mutex lock
+            let mut lock = RESOLVE_STORE.lock().unwrap();
+            let mut resolve = lock.hashmap.get_mut(&id);
+            if resolve.is_none() { panic!("ResolveID: {} not found", id) }
+            resolve.unwrap().1.take().unwrap().send(Resolve::Ok(resolution)).unwrap();
         }
-        else { panic!("ResolveID: {} not found", id) }
         Self::delete_if_resolved(id);
     }
 
     pub fn fail(id: ResolveID, error: anyhow::Error) {
         if id == NULL_RESOLVE_ID { return }
-        if let Some((_, tx)) = RESOLVE_STORE.lock().unwrap().hashmap.get_mut(&id) {
-            tx.take().expect(format!("ResolveID: {} has already been resolved", id).as_str()).send(Resolve::Err(error));
+        { // Mutex lock
+            let mut lock = RESOLVE_STORE.lock().unwrap();
+            let mut resolve = lock.hashmap.get_mut(&id);
+            if resolve.is_none() { panic!("ResolveID: {} not found", id) }
+            
+            resolve.unwrap().1.take().unwrap().send(Resolve::Err(error)).unwrap();
         }
-        else { panic!("ResolveID: {} not found", id) }
         Self::delete_if_resolved(id);
     }
 
     pub async fn receive(id: ResolveID) -> Resolve {
-        if let Some((rx, _)) = RESOLVE_STORE.lock().unwrap().hashmap.get_mut(&id) {
-            let rx = rx.take().expect(format!("ResolveID: {} has already been resolved", id).as_str());
-            Self::delete_if_resolved(id);
-            rx.await.expect("Ima be honest to ya I have no idea how this would even error")
-        } 
-        else { panic!("ResolveID: {} not found", id) }
+        let mut rx: Resolvee;
+        { // Mutex lock
+            let mut lock = RESOLVE_STORE.lock().unwrap();
+            let mut resolve = lock.hashmap.get_mut(&id);
+            if resolve.is_none() { panic!("ResolveID: {} not found", id) }
+            
+            rx = resolve.unwrap().0.take();
+        }
+        Self::delete_if_resolved(id);
+        rx.unwrap().await.expect("Ima be honest to ya I have no idea how this would even error")
     }
 }
 
