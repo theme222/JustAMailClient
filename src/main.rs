@@ -66,27 +66,31 @@ async fn runner() -> Result<()> {
     tokio::spawn(async move { net_actor.run().await; });
     tokio::spawn(async move { srv_actor.run().await; });
     
-    let service = "YAHOO";
-    let srv_config = SERVICE_CONFIG.get(service).context("Unknown service")?;
-    let login_str = format!("{}_EMAIL", service);
-    let password_str = format!("{}_PASSWORD", service);
+    let get_credential = |key: &str| {
+        let srv_config = SERVICE_CONFIG.get(key).context("Unknown service").unwrap();
+        let login_str = format!("{}_EMAIL", key);
+        let password_str = format!("{}_PASSWORD", key);
+            
+        let login = std::env::var(login_str).context("EMAIL not set").unwrap();
+        let password = std::env::var(password_str).context("PASSWORD not set").unwrap();
         
-    let login = std::env::var(login_str).context("EMAIL not set")?;
-    let password = std::env::var(password_str).context("PASSWORD not set")?;
-    
-    let creds = Credentials {
-        service: srv_config.service.clone(),
-        login: login,
-        secret: password,
-        fetch_server: srv_config.fetch_server.to_string(),
-        fetch_port: srv_config.fetch_port,
-        push_server: srv_config.push_server.to_string(),
-        push_port: srv_config.push_port,
-        auth_method: AuthMethod::LOGIN,
-        encryption_method: EncryptionMethod::SSLTLS,
+        Credentials {
+            service: srv_config.service.clone(),
+            login: login,
+            secret: password,
+            fetch_server: srv_config.fetch_server.to_string(),
+            fetch_port: srv_config.fetch_port,
+            push_server: srv_config.push_server.to_string(),
+            push_port: srv_config.push_port,
+            auth_method: AuthMethod::LOGIN,
+            encryption_method: EncryptionMethod::SSLTLS,
+        }
     };
 
-    let cred_id = CredentialStore::insert(creds).await;
+    CredentialStore::insert(get_credential("ICLOUD")).await;
+    CredentialStore::insert(get_credential("AOL")).await;
+    CredentialStore::insert(get_credential("YAHOO")).await;
+    let mut curr_cred_id = 0;
     
     // For now lets just treat this as a weird shell like interface (right now we are acting as the gui component)
     loop {
@@ -95,15 +99,24 @@ async fn runner() -> Result<()> {
         let input = input.trim();
 
         match input {
-            "send" => { Senders::net(NetMessage {action: NetAction::SEND { cred_id }, resolve: NULL_RESOLVE_ID }).await; }
-            "fetch" => { Senders::net(NetMessage {action: NetAction::LISTFETCH { cred_id }, resolve: NULL_RESOLVE_ID}).await; }
-            "status" => { Senders::net(NetMessage {action: NetAction::STATUS { cred_id }, resolve: NULL_RESOLVE_ID}).await; }
+            "help" => { println!("Available commands: send, fetch, status, list, help, stop, switch, exit, start"); }
+            "send" => { Senders::net(NetMessage {action: NetAction::SEND { cred_id: curr_cred_id }, resolve: NULL_RESOLVE_ID }).await; }
+            "fetch" => { Senders::net(NetMessage {action: NetAction::LISTFETCH { cred_id: curr_cred_id, seq_range: fetch::imap::SeqRange::all(true) }, resolve: NULL_RESOLVE_ID}).await; }
+            "status" => { Senders::net(NetMessage {action: NetAction::STATUS { cred_id: curr_cred_id }, resolve: NULL_RESOLVE_ID}).await; }
             "list" => { Senders::srv(SrvMessage {action: SrvAction::LISTEMAILS, resolve: NULL_RESOLVE_ID}).await; }
             "poll" => { Senders::net(NetMessage {action: NetAction::POLL, resolve: NULL_RESOLVE_ID}).await; }
-            "help" => { println!("Available commands: send, fetch, status, list, help, exit"); }
+            "start" => { Senders::net(NetMessage {action: NetAction::START { cred_id: curr_cred_id }, resolve: NULL_RESOLVE_ID}).await; }
+            "stop" => { Senders::net(NetMessage {action: NetAction::STOP { cred_id: curr_cred_id }, resolve: NULL_RESOLVE_ID}).await; }
             "exit" => { break; }
+            input if input.starts_with("switch ") => {
+                let cred_id = input[7..].parse::<CredentialID>().unwrap();
+                curr_cred_id = cred_id;
+                println!("Switched to credential {}", cred_id);
+            }
             _ => { println!("Unknown command: {}", input); }
         }
+
+        AppStateStore::ping();
     }
     
     Senders::net(NetMessage {action: NetAction::SHUTDOWN, resolve: NULL_RESOLVE_ID}).await; 

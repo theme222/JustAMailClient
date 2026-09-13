@@ -20,6 +20,16 @@ pub fn spawn_handle_err<F: std::future::Future<Output = Result<Resolution>> + Se
     tokio::spawn(await_handle_err(future, context, res_id));
 }
 
+pub fn spawn_or_err<F: std::future::Future<Output = Result<()>> + Send + 'static>(future: F, context: &'static str, res_id: ResolveID) {
+    // The key difference here is that the future also takes in the resolve id so we must only resolve on fail
+    tokio::spawn(async move {
+        if let Err(e) = future.await {
+            eprintln!("[ERR] {}: {}", context, e);
+            ResolveStore::fail(res_id, e);
+        }
+    });
+}
+
 pub async fn await_handle_err(future: impl std::future::Future<Output = Result<Resolution>>, context: &str, res_id: ResolveID) {
     let res = future.await;
     if let Err(e) = res { 

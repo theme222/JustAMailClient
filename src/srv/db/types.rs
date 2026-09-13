@@ -11,7 +11,7 @@ pub trait SQLObj: Sized + for<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> + S
 
     fn get_key(&self) -> &Option<KeyWrapper<Self::Key>>;
     fn get_key_mut(&mut self) -> &mut Option<KeyWrapper<Self::Key>>;
-    async fn resolve_foreign(&mut self, db_tx: &mut DBTx<'_>);
+    async fn resolve_foreign(&mut self, db_tx: &mut DBTx<'_>); // Resolves foreign keys
     async fn upsert(&self, db_tx: &mut DBTx<'_>) -> Result<SqliteQueryResult, sqlx::Error>;
     
     fn new(k: Self::Key) -> Self {
@@ -19,6 +19,16 @@ pub trait SQLObj: Sized + for<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> + S
         *obj.get_key_mut() = Some(KeyWrapper(k));
         obj
     }
+    async fn resolve_keys(&mut self, db_tx: &mut DBTx<'_>) { // Resolves primary and foreign keys
+        self.resolve_foreign(db_tx).await;
+        self.resolve_primary(db_tx).await;
+    }
+    async fn resolve_primary(&mut self, db_tx: &mut DBTx<'_>) { // Resolves the primary key
+        if self.get_key().is_none() { return; }
+        let key = self.get_key().clone().unwrap().0;
+        let resolved = key.resolve(db_tx).await;
+        *self.get_key_mut() = resolved.and_then(|k| Some(KeyWrapper(k)));
+    } 
     async fn find(&self, db_tx: &mut DBTx<'_>) -> Result<Option<Self>, sqlx::Error> {
         let key = self.get_key();
         if key.is_none() { return Ok(None); }
@@ -31,15 +41,23 @@ pub trait SQLObj: Sized + for<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> + S
             .fetch_optional(&mut **db_tx)
             .await
     }
-    async fn from_key(key: &KeyWrapper<Self::Key>, db_tx: &mut DBTx<'_>) -> Result<Option<Self>, sqlx::Error> {
+    async fn from_key(key: &Self::Key, db_tx: &mut DBTx<'_>) -> Result<Option<Self>, sqlx::Error> { // Get the object from the database by key
         let mut qb: sqlx::QueryBuilder<Sqlite> = sqlx::QueryBuilder::new(format!("SELECT * FROM {} WHERE ", Self::DB_TABLE));
-        
-        let key = key.0.resolve(db_tx).await.unwrap(); // Resolve the key into a standard form
-        key.condition(&mut qb);
-        
+        let mut obj = Self::new(key.clone());
+        obj.resolve_primary(db_tx).await;
+        if obj.get_key().is_none() { return Ok(None); }
+        obj.get_key().as_ref().unwrap().0.condition(&mut qb);
         qb.build_query_as::<Self>()
             .fetch_optional(&mut **db_tx)
             .await
+    }
+    async fn rm(&self, db_tx: &mut DBTx<'_>) -> Result<SqliteQueryResult, sqlx::Error> {
+        let mut qb: sqlx::QueryBuilder<Sqlite> = sqlx::QueryBuilder::new(format!("DELETE FROM {} WHERE ", Self::DB_TABLE));
+        
+        let key = self.get_key().clone().expect("Key must exist to remove from database").0.resolve(db_tx).await.unwrap(); // Resolve the key into a standard form
+        key.condition(&mut qb);
+        
+        qb.build().execute(&mut **db_tx).await
     }
 }
 

@@ -1,7 +1,7 @@
 // Mutex-protected stores for the application state (slower to access than globals cause mutex)
 use std::{panic, sync::Mutex};
 
-use crate::{models::Senders, srv::{self}};
+use crate::{models::{AppState::{ACTIVE, FOCUSED, INACTIVE}, Senders}, srv::{self}};
 use crate::db::types::{SQLKey, SQLObj};
 use anyhow::Result;
 use futures::lock;
@@ -98,21 +98,19 @@ static APP_STATE_STORE: std::sync::LazyLock<AppStateStore> = std::sync::LazyLock
 pub struct AppStateStore {
     recv: tokio::sync::watch::Receiver<AppState>,
     sender: tokio::sync::watch::Sender<AppState>,
+    last_change_time: Mutex<std::time::Instant>,
 }
 
 impl AppStateStore {
     pub fn init() -> AppStateStore {
-        let (send, recv) = tokio::sync::watch::channel(AppState::OUTOFFOCUS);
+        let (send, recv) = tokio::sync::watch::channel(AppState::ACTIVE);
         AppStateStore {
             recv: recv,
             sender: send,
+            last_change_time: Mutex::new(std::time::Instant::now()),
         }
     }
 
-    pub fn change(state: AppState) {
-        APP_STATE_STORE.sender.send(state);
-    }
-    
     pub fn set(state: AppState) {
         APP_STATE_STORE.sender.send(state);
     }
@@ -120,10 +118,34 @@ impl AppStateStore {
     pub fn get() -> AppState {
         APP_STATE_STORE.recv.borrow().clone()
     }
+
+    pub fn update() {
+        let ch_time = APP_STATE_STORE.last_change_time.lock().unwrap();
+        let duration = std::time::Instant::now().duration_since( *ch_time );
+        if duration < std::time::Duration::from_secs(60) {
+            APP_STATE_STORE.sender.send(ACTIVE);
+        }
+        else if duration < std::time::Duration::from_secs(300) {
+            APP_STATE_STORE.sender.send(FOCUSED);
+        }
+        else if duration < std::time::Duration::from_secs(1800) {
+            APP_STATE_STORE.sender.send(INACTIVE);
+        }
+        else {
+            APP_STATE_STORE.sender.send(AppState::AFK); // Not sure why the compiler wants me to qualify this one 
+        }
+    }
+
+    pub fn ping() {
+        *APP_STATE_STORE.last_change_time.lock().unwrap() = std::time::Instant::now();
+        Self::set(ACTIVE);
+        // Self::update(); // Possible race condition?
+    }
     
     pub async fn await_change() -> AppState {
         let current = Self::get();
-        APP_STATE_STORE.recv.clone().wait_for(|state| state != &current).await.unwrap().clone()
+        let mut recv = APP_STATE_STORE.recv.clone();
+        recv.wait_for(|state| state != &current).await.unwrap().clone()
     }
 }
 
@@ -131,7 +153,6 @@ impl AppStateStore {
 pub enum AppState {
     AFK, // Idle for > 30 minutes
     INACTIVE, // Idle for 10 - 30 minutes
-    OUTOFFOCUS, // Idle for 1 - 10 minutes and app isn't focused
     FOCUSED, // Idle for 1 - 10 minutes and app is focused
     ACTIVE,  // Idle for < 1 minutes (app focused or unfocused doesn't matter)
 }
@@ -140,12 +161,13 @@ pub type Resolve = anyhow::Result<Resolution>;
 
 #[derive(Debug)]
 pub enum Resolution {
-    Nothing,
+    Nothing, // Mbappe Special
     MailboxSQL(crate::db::MailboxSQL),
     MessageAndPartSQL(Vec<crate::db::MessageSQL>, Vec<crate::db::MessagePartSQL>),
     MessageSQL(crate::db::MessageSQL),
     MessagePartSQL(crate::db::MessagePartSQL),
     AccountSQL(crate::db::AccountSQL),
+    Search(std::collections::HashSet<u32>),
     Status(Vec<(crate::net::fetch::imap::ImapSessionId, crate::Status)>),
 }
 

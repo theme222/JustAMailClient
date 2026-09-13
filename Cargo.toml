@@ -30,6 +30,7 @@ constcat = "0.6.1"
 serde_sqlite_jsonb = "0.2.1"
 num-traits = "0.2.19"
 num-derive = "0.5.1"
+bimap = "0.6.3"
 
 [lints.rust]
 unused = "allow"

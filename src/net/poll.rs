@@ -27,7 +27,7 @@ impl PollTask {
             );
             if change.is_none() {
                 self.last_poll_time = Instant::now();
-                Senders::net(NetMessage { action: super::NetAction::POLL, resolve: NULL_RESOLVE_ID }).await;
+                // Senders::net(NetMessage { action: super::NetAction::POLL, resolve: NULL_RESOLVE_ID }).await;
             }
             else if let Some(new) = change {
                 let old_duration = self.duration_based_on_state();
@@ -38,6 +38,7 @@ impl PollTask {
                 if duration_left < new_duration { duration_todo = Some(duration_left); }
                 else { duration_todo = None; }
             }
+            AppStateStore::update(); // Force the app state to re evaluate the poll duration
         }
     }
 
@@ -45,7 +46,6 @@ impl PollTask {
         match self.current_state {
             AppState::AFK => Duration::from_mins(10),
             AppState::INACTIVE => Duration::from_mins(5),
-            AppState::OUTOFFOCUS => Duration::from_mins(1),
             AppState::FOCUSED => Duration::from_secs(30),
             AppState::ACTIVE => Duration::from_secs(10),
         }
